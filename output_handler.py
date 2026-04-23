@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -70,21 +71,38 @@ def _style_total_cell(cell, value) -> None:
     cell.border = _BORDER
 
 
-def _achievement_fill(actual: int, required: int) -> "PatternFill | None":
-    """Return a fill reflecting how close `actual` is to `required`. None on error."""
+def _add_achievement_cf(ws, gesamt_col: int, benoetigt_col: int, first_row: int, last_row: int) -> None:
+    """
+    Add conditional-formatting rules to the Gesamt column so Excel re-colours
+    cells dynamically whenever the user edits a Benötigt value.
+
+    Rules reference the Benötigt cell in the same row via a formula, so the
+    colour updates live — no need to regenerate the file after edits.
+    Priority order: green (highest) → yellow → orange → red.
+    """
     try:
-        if required <= 0:
-            return None
-        pct = actual / required
-        color = (
-            _ACH_GREEN  if pct >= 1.0 else
-            _ACH_YELLOW if pct >= 0.8 else
-            _ACH_ORANGE if pct >= 0.5 else
-            _ACH_RED
-        )
-        return PatternFill(start_color=color, end_color=color, fill_type="solid")
+        g = get_column_letter(gesamt_col)
+        b = get_column_letter(benoetigt_col)
+        cf_range = f"{g}{first_row}:{g}{last_row}"
+        # Formulas are written for the first row; Excel adjusts them per row.
+        gf = f"{g}{first_row}"
+        bf = f"{b}{first_row}"
+        for formula, color in (
+            (f'AND({bf}<>"",{bf}>0,{gf}/{bf}>=1)',   _ACH_GREEN),
+            (f'AND({bf}<>"",{bf}>0,{gf}/{bf}>=0.8)', _ACH_YELLOW),
+            (f'AND({bf}<>"",{bf}>0,{gf}/{bf}>=0.5)', _ACH_ORANGE),
+            (f'AND({bf}<>"",{bf}>0,{gf}/{bf}>0)',    _ACH_RED),
+        ):
+            ws.conditional_formatting.add(
+                cf_range,
+                FormulaRule(
+                    formula=[formula],
+                    fill=PatternFill(start_color=color, end_color=color, fill_type="solid"),
+                    stopIfTrue=True,
+                ),
+            )
     except Exception:
-        return None
+        pass  # CF is cosmetic — never let it break the file
 
 
 def _autofit_columns(ws, max_width: int = 60) -> None:
@@ -184,21 +202,20 @@ def save_output(
             required = _lookup_required(section)
             try:
                 if required is not None:
-                    # Colour the Gesamt cell to show achievement level.
-                    fill = _achievement_fill(actual_total, required)
-                    if fill:
-                        gesamt_cell.fill = fill
-                    # Write the required amount next to Gesamt.
                     req_cell = ws.cell(row=row_offset, column=benoetigt_col)
                     req_cell.value = required
                     req_cell.font = Font(bold=True)
                     req_cell.alignment = Alignment(horizontal="right")
                     req_cell.border = _BORDER
                 else:
-                    # No required amount for this section — empty bordered cell.
                     ws.cell(row=row_offset, column=benoetigt_col).border = _BORDER
             except Exception:
                 pass  # never let reference rendering break the output
+
+    # Conditional formatting on the entire Gesamt column — colours update live
+    # in Excel when the user edits a Benötigt cell (no file regeneration needed).
+    if has_reference and data:
+        _add_achievement_cf(ws, gesamt_col, benoetigt_col, first_row=2, last_row=len(data) + 1)
 
     next_row = len(data) + 2  # first row after data
 
