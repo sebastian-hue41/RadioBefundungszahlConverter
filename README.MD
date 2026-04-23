@@ -143,11 +143,4 @@ All input files are treated as potentially malicious:
 - File size is capped at 50 MB
 - Every string cell value is checked for formula injection characters (`=`, `+`, `-`, `@`, `|`, …)
 
----
 
-## Roadmap
-
-- [ ] REST API wrapper (FastAPI) — logic layer is already server-compatible
-- [ ] Admin endpoint to upload a corrected map file
-- [ ] Multi-physician batch processing
-- [ ] Web frontend for file upload and report download

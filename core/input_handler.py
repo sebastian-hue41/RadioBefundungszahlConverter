@@ -3,14 +3,23 @@ input_handler.py — file validation and loading for statistics.xlsx and map.xls
 
 All inputs are treated as potentially malicious. Validation is strict.
 Designed for server-side use: no interactive prompts, structured errors only.
+
+Both loaders accept a file-system path (str / Path) OR in-memory bytes / BytesIO
+so the same code is used by the CLI and the iii web worker without any disk writes
+on the server side.
 """
 
+import io
 import re
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Union
 
 import openpyxl
+
+# Type alias accepted by both loaders.
+XlsxSource = Union[str, Path, bytes, io.BytesIO]
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -45,6 +54,29 @@ class MapValidationError(ValueError):
 
 # ── Shared security validation ─────────────────────────────────────────────────
 
+def _validate_zip_content(data: bytes, label: str) -> None:
+    """
+    Inspect xlsx bytes as a zip archive.
+    Shared by both the path-based and bytes-based validators.
+    Raises FileValidationError on any problem.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+            names = zf.namelist()
+            if "xl/workbook.xml" not in names:
+                raise FileValidationError(
+                    f"File does not appear to be a valid xlsx (xl/workbook.xml missing): {label}"
+                )
+            if any(n.startswith("xl/vbaProject") for n in names):
+                raise FileValidationError(
+                    f"File contains VBA macros and cannot be processed safely: {label}"
+                )
+    except zipfile.BadZipFile as exc:
+        raise FileValidationError(
+            f"File is not a valid xlsx archive (corrupt or disguised file): {label}"
+        ) from exc
+
+
 def validate_xlsx_file(path: str) -> Path:
     """
     Validates that `path` points to a safe, well-formed xlsx file.
@@ -58,10 +90,8 @@ def validate_xlsx_file(path: str) -> Path:
 
     if not p.exists():
         raise FileValidationError(f"File not found: {p}")
-
     if not p.is_file():
         raise FileValidationError(f"Path does not point to a file: {p}")
-
     if p.suffix.lower() not in ALLOWED_EXTENSIONS:
         raise FileValidationError(
             f"Unsupported file type '{p.suffix}' — only .xlsx files are accepted: {p.name}"
@@ -70,31 +100,29 @@ def validate_xlsx_file(path: str) -> Path:
     size_bytes = p.stat().st_size
     if size_bytes == 0:
         raise FileValidationError(f"File is empty (0 bytes): {p.name}")
-
     size_mb = size_bytes / (1024 * 1024)
     if size_mb > MAX_FILE_SIZE_MB:
         raise FileValidationError(
             f"File is too large ({size_mb:.1f} MB, limit is {MAX_FILE_SIZE_MB} MB): {p.name}"
         )
 
-    # xlsx files are zip archives — verify the container and reject macros.
-    try:
-        with zipfile.ZipFile(p, "r") as zf:
-            names = zf.namelist()
-            if "xl/workbook.xml" not in names:
-                raise FileValidationError(
-                    f"File does not appear to be a valid xlsx (xl/workbook.xml missing): {p.name}"
-                )
-            if any(n.startswith("xl/vbaProject") for n in names):
-                raise FileValidationError(
-                    f"File contains VBA macros and cannot be processed safely: {p.name}"
-                )
-    except zipfile.BadZipFile as exc:
-        raise FileValidationError(
-            f"File is not a valid xlsx archive (corrupt or disguised file): {p.name}"
-        ) from exc
-
+    _validate_zip_content(p.read_bytes(), p.name)
     return p
+
+
+def validate_xlsx_bytes(data: bytes, name: str = "upload") -> None:
+    """
+    Validates xlsx content supplied as raw bytes (e.g. from an HTTP upload).
+    Raises FileValidationError on any problem.
+    """
+    if not data:
+        raise FileValidationError(f"File is empty: {name}")
+    size_mb = len(data) / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise FileValidationError(
+            f"File is too large ({size_mb:.1f} MB, limit is {MAX_FILE_SIZE_MB} MB): {name}"
+        )
+    _validate_zip_content(data, name)
 
 
 def _check_cell_for_injection(value, context: str = "") -> None:
@@ -141,25 +169,41 @@ def _parse_year(value) -> int | None:
     return None
 
 
-def load_statistics(path: str) -> dict:
+def _resolve_source(source: XlsxSource, label: str) -> "Path | io.BytesIO":
+    """
+    Validate and normalise a source to either a Path (CLI) or BytesIO (web).
+    Raises FileValidationError on any security or format problem.
+    """
+    if isinstance(source, (bytes, io.BytesIO)):
+        data = source if isinstance(source, bytes) else source.read()
+        validate_xlsx_bytes(data, label)
+        return io.BytesIO(data)
+    return validate_xlsx_file(str(source))
+
+
+def load_statistics(source: XlsxSource) -> dict:
     """
     Loads and validates the statistics xlsx file.
 
+    `source` may be a file-system path (str / Path) or in-memory data
+    (bytes / BytesIO) — the same validation and parsing runs in both cases.
+
     Returns a dict:
-        mitarbeiter    str | None
-        befunddatum    str | None
-        total          int | None   (expected examination count from L8)
-        leistungen     list[dict]   (one entry per data row)
-        errors         list[str]    (non-fatal warnings accumulated during load)
+        mitarbeiter      str | None
+        befunddatum      str | None
+        total_documents  int | None   (L8 — Befunddokumente count, informational)
+        total_leistungen int | None   (IND2-algorithm total, used for count check)
+        leistungen       list[dict]   (one entry per data row)
+        errors           list[str]    (non-fatal warnings accumulated during load)
 
     Raises StatsValidationError for fatal structural problems.
     Raises FileValidationError for file-level security problems.
     """
-    p = validate_xlsx_file(path)
+    src = _resolve_source(source, "statistics.xlsx")
     errors: list[str] = []
 
     try:
-        wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
     except Exception as exc:
         raise StatsValidationError(f"Cannot open statistics file: {exc}") from exc
 
@@ -359,9 +403,12 @@ def load_statistics(path: str) -> dict:
 
 # ── Map loader ─────────────────────────────────────────────────────────────────
 
-def load_map(path: str, include_underscore_columns: bool = False) -> dict:
+def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> dict:
     """
     Loads and validates the map xlsx file.
+
+    `source` may be a file-system path (str / Path) or in-memory data
+    (bytes / BytesIO).
 
     Parameters
     ----------
@@ -377,10 +424,10 @@ def load_map(path: str, include_underscore_columns: bool = False) -> dict:
     Raises MapValidationError for structural/content problems.
     Raises FileValidationError for file-level security problems.
     """
-    p = validate_xlsx_file(path)
+    src = _resolve_source(source, "map.xlsx")
 
     try:
-        wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
     except Exception as exc:
         raise MapValidationError(f"Cannot open map file: {exc}") from exc
 

@@ -1,10 +1,15 @@
 """
-output_handler.py — creates and saves the output xlsx file.
+output_handler.py — xlsx generation from a processing result dict.
 
-Designed to be server-compatible: accepts result dict + output directory,
-returns the saved file path. No interactive prompts.
+Two public entry points:
+  build_xlsx_bytes(result) -> (filename, bytes)
+      Builds the workbook entirely in memory. Used by the iii web worker —
+      no files are ever written to disk on the server.
+  save_output(result, output_dir) -> str
+      Builds the workbook and saves it to disk. Used by the CLI.
 """
 
+import io
 import re
 from datetime import datetime
 from pathlib import Path
@@ -74,31 +79,12 @@ def _autofit_columns(ws, max_width: int = 60) -> None:
         ws.column_dimensions[col_letter].width = min(best + 4, max_width)
 
 
-def save_output(result: dict, output_dir: str = ".") -> str:
+def _build_workbook(result: dict) -> tuple[str, openpyxl.Workbook]:
     """
-    Creates an xlsx file from the processing result and saves it to `output_dir`.
-
-    Parameters
-    ----------
-    result      : dict returned by logic.process()
-    output_dir  : directory where the file is saved (default: current directory)
-
-    Returns
-    -------
-    str — absolute path of the saved file.
-
-    Raises
-    ------
-    IOError if the file cannot be written.
+    Build an openpyxl Workbook from a processing result dict.
+    Returns (filename, workbook) — no I/O performed.
     """
     filename = _make_filename(result.get("mitarbeiter"), result.get("befunddatum"))
-
-    try:
-        out_dir = Path(output_dir).resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        output_path = out_dir / filename
-    except Exception as exc:
-        raise IOError(f"Cannot prepare output directory '{output_dir}': {exc}") from exc
 
     years: list[int] = result["years"]
     data: dict[str, dict] = result["data"]
@@ -230,6 +216,37 @@ def save_output(result: dict, output_dir: str = ".") -> str:
             ws.row_dimensions[next_row].height = 30
 
     _autofit_columns(ws)
+    return filename, wb
+
+
+def build_xlsx_bytes(result: dict) -> tuple[str, bytes]:
+    """
+    Build the xlsx entirely in memory and return (filename, raw_bytes).
+
+    No files are written to disk — intended for the iii web worker where
+    the bytes are streamed directly back to the HTTP client.
+    """
+    filename, wb = _build_workbook(result)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return filename, buf.getvalue()
+
+
+def save_output(result: dict, output_dir: str = ".") -> str:
+    """
+    Build the xlsx and save it to `output_dir` on disk.
+
+    Returns the absolute path of the saved file.
+    Raises IOError if the directory cannot be created or the file cannot be written.
+    """
+    filename, wb = _build_workbook(result)
+
+    try:
+        out_dir = Path(output_dir).resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = out_dir / filename
+    except Exception as exc:
+        raise IOError(f"Cannot prepare output directory '{output_dir}': {exc}") from exc
 
     try:
         wb.save(output_path)
