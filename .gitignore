@@ -1,5 +1,6 @@
 # Excel files — never commit patient/medical data
 *.xlsx
+!reference_amount.xlsx
 *.xls
 *.xlsm
 *.xlsb
