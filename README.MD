@@ -134,7 +134,7 @@ A two-column file with required examination counts per section:
 
 #### Colour coding
 
-When reference data is present, the **Gesamt** cell for each section is colour-coded:
+When reference data is present, the **Gesamt** cell for each section is colour-coded using Excel **conditional formatting** — the colour updates live when you edit a Benötigt value directly in the output file, without needing to regenerate it.
 
 | Colour | Meaning |
 |---|---|
