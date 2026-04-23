@@ -51,6 +51,7 @@ from core.input_handler import (
     MAX_FILE_SIZE_MB,
     StatsValidationError,
     load_map,
+    load_reference_amounts,
     load_statistics,
 )
 from core.logic import process
@@ -210,11 +211,21 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
     # Treat only the literal string "true" as truthy — anything else is false.
     include_underscore = include_underscore_raw.strip().lower() == "true"
 
+    # ── Optional reference amounts (never fatal — silently omitted if absent) ──
+    reference_amounts: dict[str, int] = {}
+    ref_bytes = fields.get("reference")
+    if ref_bytes:
+        try:
+            reference_amounts = load_reference_amounts(io.BytesIO(ref_bytes))
+            log.info("Reference amounts loaded: %d section(s)", len(reference_amounts))
+        except Exception as exc:
+            log.warning("Reference amounts field present but could not be loaded: %s", exc)
+
     # ── Core processing (no disk I/O) ─────────────────────────────────────────
     stats_data = load_statistics(io.BytesIO(stats_bytes))
     map_data = load_map(io.BytesIO(map_bytes), include_underscore_columns=include_underscore)
     result = process(stats_data, map_data)
-    filename, xlsx_bytes = build_xlsx_bytes(result)
+    filename, xlsx_bytes = build_xlsx_bytes(result, reference_amounts=reference_amounts or None)
 
     # ── Stream the response ───────────────────────────────────────────────────
     await res.status(200)

@@ -10,6 +10,7 @@ on the server side.
 """
 
 import io
+import logging
 import re
 import zipfile
 from datetime import datetime
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Union
 
 import openpyxl
+
+log = logging.getLogger(__name__)
 
 # Type alias accepted by both loaders.
 XlsxSource = Union[str, Path, bytes, io.BytesIO]
@@ -31,6 +34,9 @@ ALLOWED_EXTENSIONS = {".xlsx"}
 # Zip bomb limits: per-entry ratio and total uncompressed budget.
 _MAX_ENTRY_RATIO = 50        # compressed → uncompressed inflation per zip entry
 _MAX_UNCOMPRESSED_MB = 200   # total uncompressed content across the whole archive
+
+_MAX_REFERENCE_ROWS = 10_000
+_MAX_REFERENCE_AMOUNT = 1_000_000
 
 # Cells/values starting with these chars are formula injection attempts.
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "|", "\t", "\r")
@@ -631,3 +637,131 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
         "leistungen": leistungen,
         "merged_duplicates": merged_duplicates,
     }
+
+
+# ── Reference amounts loader ───────────────────────────────────────────────────
+
+def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
+    """
+    Loads section → required-amount mapping from a reference xlsx.
+
+    Accepts the same XlsxSource union as the other loaders (path or BytesIO),
+    so it works identically from the CLI (path) and the web worker (bytes).
+
+    Expected format (reference_amount.xlsx):
+        Row 1 : headers, e.g. 'Leistungsbereich' | 'Benötigt'
+        Rows 2+: section name in col A, positive integer in col B (None = skip)
+
+    Returns {} on ANY error — never raises.
+    All problems are logged at WARNING so normal processing is never interrupted
+    even if the reference file is missing, corrupt, or malicious.
+    """
+    amounts: dict[str, int] = {}
+
+    # ── Validate and normalise source ──────────────────────────────────────────
+    try:
+        src = _resolve_source(source, "reference_amount.xlsx")
+    except FileValidationError as exc:
+        log.warning("Reference amounts file failed security validation: %s", exc)
+        return amounts
+    except Exception as exc:
+        log.warning("Reference amounts: unexpected validation error: %s", exc)
+        return amounts
+
+    # ── Open workbook ──────────────────────────────────────────────────────────
+    try:
+        wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
+    except Exception as exc:
+        log.warning("Reference amounts: cannot open file: %s", exc)
+        return amounts
+
+    try:
+        ws = wb.active
+        if ws is None:
+            log.warning("Reference amounts: no active worksheet found")
+            return amounts
+
+        header_skipped = False
+        row_count = 0
+
+        for row_num, row in enumerate(ws.iter_rows(values_only=True), 1):
+            try:
+                row = list(row)
+
+                # Skip completely empty rows.
+                if all(v is None for v in row[:5]):
+                    continue
+
+                # Skip the first non-empty row when col B is absent or a string
+                # (treat it as a header row).
+                if not header_skipped:
+                    header_skipped = True
+                    b_val = row[1] if len(row) > 1 else None
+                    if b_val is None or isinstance(b_val, str):
+                        continue
+
+                row_count += 1
+                if row_count > _MAX_REFERENCE_ROWS:
+                    log.warning(
+                        "Reference amounts: file exceeds the %d-row limit — stopping early",
+                        _MAX_REFERENCE_ROWS,
+                    )
+                    break
+
+                name_raw = row[0] if len(row) > 0 else None
+                amount_raw = row[1] if len(row) > 1 else None
+
+                if name_raw is None or amount_raw is None:
+                    continue
+
+                name_str = str(name_raw).strip()
+                if not name_str:
+                    continue
+
+                # Reject formula injection in section names.
+                try:
+                    _check_cell_for_injection(name_str, f"reference name at row {row_num}")
+                except FileValidationError as exc:
+                    log.warning("Reference amounts: skipping row %d — %s", row_num, exc)
+                    continue
+
+                # Parse amount as a positive integer within a sane range.
+                try:
+                    amount = int(float(str(amount_raw).strip()))
+                except (ValueError, TypeError):
+                    log.warning(
+                        "Reference amounts: cannot parse amount %r at row %d, skipping",
+                        amount_raw, row_num,
+                    )
+                    continue
+
+                if amount <= 0:
+                    log.warning(
+                        "Reference amounts: non-positive value %d at row %d, skipping",
+                        amount, row_num,
+                    )
+                    continue
+                if amount > _MAX_REFERENCE_AMOUNT:
+                    log.warning(
+                        "Reference amounts: implausibly large value %d at row %d, skipping",
+                        amount, row_num,
+                    )
+                    continue
+
+                amounts[name_str] = amount
+
+            except Exception as exc:
+                log.warning("Reference amounts: error processing row %d — %s", row_num, exc)
+                continue
+
+    except Exception as exc:
+        log.warning("Reference amounts: unexpected error reading file — %s", exc)
+        return {}
+
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+
+    return amounts

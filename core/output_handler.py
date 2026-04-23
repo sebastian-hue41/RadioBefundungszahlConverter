@@ -26,6 +26,12 @@ _ERROR_COLOR = "CC0000"
 _NOTE_COLOR = "856404"
 _MISMATCH_BG = "FFE0E0"
 
+# Achievement fill colors for Gesamt cell when reference amounts are provided.
+_ACH_GREEN  = "C6EFCE"   # >= 100 % of required
+_ACH_YELLOW = "FFEB9C"   # >= 80 %
+_ACH_ORANGE = "FFD966"   # >= 50 %
+_ACH_RED    = "FFC7CE"   # <  50 %
+
 _THIN = Side(style="thin")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
@@ -69,6 +75,23 @@ def _style_total_cell(cell, value) -> None:
     cell.border = _BORDER
 
 
+def _achievement_fill(actual: int, required: int) -> "PatternFill | None":
+    """Return a fill reflecting how close `actual` is to `required`. None on error."""
+    try:
+        if required <= 0:
+            return None
+        pct = actual / required
+        color = (
+            _ACH_GREEN  if pct >= 1.0 else
+            _ACH_YELLOW if pct >= 0.8 else
+            _ACH_ORANGE if pct >= 0.5 else
+            _ACH_RED
+        )
+        return PatternFill(start_color=color, end_color=color, fill_type="solid")
+    except Exception:
+        return None
+
+
 def _autofit_columns(ws, max_width: int = 60) -> None:
     for col in ws.columns:
         col_letter = get_column_letter(col[0].column)
@@ -79,7 +102,10 @@ def _autofit_columns(ws, max_width: int = 60) -> None:
         ws.column_dimensions[col_letter].width = min(best + 4, max_width)
 
 
-def _build_workbook(result: dict) -> tuple[str, openpyxl.Workbook]:
+def _build_workbook(
+    result: dict,
+    reference_amounts: "dict[str, int] | None" = None,
+) -> tuple[str, openpyxl.Workbook]:
     """
     Build an openpyxl Workbook from a processing result dict.
     Returns (filename, workbook) — no I/O performed.
@@ -99,14 +125,33 @@ def _build_workbook(result: dict) -> tuple[str, openpyxl.Workbook]:
     ws.title = "Auswertung"
     ws.freeze_panes = "B2"  # freeze header row and section column
 
+    # Build a case-insensitive fallback lookup so minor capitalisation
+    # differences between the map and the reference file still match.
+    _ref: dict[str, int] = reference_amounts or {}
+    _ref_lower: dict[str, int] = {k.lower(): v for k, v in _ref.items()}
+    has_reference = bool(_ref)
+
+    def _lookup_required(section_name: str) -> "int | None":
+        try:
+            if section_name in _ref:
+                return _ref[section_name]
+            return _ref_lower.get(section_name.lower())
+        except Exception:
+            return None
+
     # ── Header row ────────────────────────────────────────────────────────────
     col_headers = ["Leistungsbereich"] + [str(y) for y in years] + ["Gesamt"]
+    if has_reference:
+        col_headers.append("Benötigt")
     for col_idx, header_text in enumerate(col_headers, 1):
         _style_header_cell(ws.cell(row=1, column=col_idx), header_text)
 
     ws.row_dimensions[1].height = 30
 
     # ── Data rows ─────────────────────────────────────────────────────────────
+    gesamt_col = len(years) + 2
+    benoetigt_col = gesamt_col + 1
+
     for row_offset, (section, year_data) in enumerate(data.items(), 2):
         _style_data_cell(ws.cell(row=row_offset, column=1), section)
 
@@ -116,10 +161,26 @@ def _build_workbook(result: dict) -> tuple[str, openpyxl.Workbook]:
                 year_data.get(year, 0),
             )
 
-        _style_total_cell(
-            ws.cell(row=row_offset, column=len(years) + 2),
-            year_data.get("Total", 0),
-        )
+        actual_total = year_data.get("Total", 0)
+        gesamt_cell = ws.cell(row=row_offset, column=gesamt_col)
+        _style_total_cell(gesamt_cell, actual_total)
+
+        if has_reference:
+            required = _lookup_required(section)
+            try:
+                if required is not None:
+                    fill = _achievement_fill(actual_total, required)
+                    if fill:
+                        gesamt_cell.fill = fill
+                    req_cell = ws.cell(row=row_offset, column=benoetigt_col)
+                    req_cell.value = required
+                    req_cell.font = Font(bold=True)
+                    req_cell.alignment = Alignment(horizontal="right")
+                    req_cell.border = _BORDER
+                else:
+                    ws.cell(row=row_offset, column=benoetigt_col).border = _BORDER
+            except Exception:
+                pass  # never let reference rendering break the output
 
     next_row = len(data) + 2  # first row after data
 
@@ -219,27 +280,34 @@ def _build_workbook(result: dict) -> tuple[str, openpyxl.Workbook]:
     return filename, wb
 
 
-def build_xlsx_bytes(result: dict) -> tuple[str, bytes]:
+def build_xlsx_bytes(
+    result: dict,
+    reference_amounts: "dict[str, int] | None" = None,
+) -> tuple[str, bytes]:
     """
     Build the xlsx entirely in memory and return (filename, raw_bytes).
 
     No files are written to disk — intended for the iii web worker where
     the bytes are streamed directly back to the HTTP client.
     """
-    filename, wb = _build_workbook(result)
+    filename, wb = _build_workbook(result, reference_amounts=reference_amounts)
     buf = io.BytesIO()
     wb.save(buf)
     return filename, buf.getvalue()
 
 
-def save_output(result: dict, output_dir: str = ".") -> str:
+def save_output(
+    result: dict,
+    output_dir: str = ".",
+    reference_amounts: "dict[str, int] | None" = None,
+) -> str:
     """
     Build the xlsx and save it to `output_dir` on disk.
 
     Returns the absolute path of the saved file.
     Raises IOError if the directory cannot be created or the file cannot be written.
     """
-    filename, wb = _build_workbook(result)
+    filename, wb = _build_workbook(result, reference_amounts=reference_amounts)
 
     try:
         out_dir = Path(output_dir).resolve()

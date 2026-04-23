@@ -20,6 +20,7 @@ from core.input_handler import (
     MapValidationError,
     StatsValidationError,
     load_map,
+    load_reference_amounts,
     load_statistics,
 )
 from core.logic import process
@@ -54,6 +55,15 @@ examples:
         action="store_true",
         help="Include underscore-prefixed section columns from the map (e.g. _CLIP, _TRENNER)",
     )
+    parser.add_argument(
+        "--reference",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Path to the reference xlsx with required amounts per section "
+            "(default: auto-detect 'reference_amount.xlsx' in the current directory)"
+        ),
+    )
     return parser
 
 
@@ -65,6 +75,15 @@ def main() -> int:
     """
     parser = _build_parser()
     args = parser.parse_args()
+
+    # ── Load reference amounts (optional, never fatal) ─────────────────────────
+    reference_path = args.reference or "reference_amount.xlsx"
+    print(f"[ref] Looking for reference amounts: {reference_path}")
+    reference_amounts = load_reference_amounts(reference_path)
+    if reference_amounts:
+        print(f"  -> {len(reference_amounts)} section(s) with required amounts loaded")
+    else:
+        print("  -> No reference amounts found — 'Benötigt' column will be omitted")
 
     # ── Load statistics ────────────────────────────────────────────────────────
     print(f"[1/3] Loading statistics: {args.statistics}")
@@ -128,7 +147,7 @@ def main() -> int:
 
     # ── Save output ────────────────────────────────────────────────────────────
     try:
-        out_path = save_output(result, output_dir=args.output)
+        out_path = save_output(result, output_dir=args.output, reference_amounts=reference_amounts)
     except IOError as exc:
         print(f"\n  ERROR saving output: {exc}", file=sys.stderr)
         return 1
