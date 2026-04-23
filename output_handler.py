@@ -21,6 +21,12 @@ _ERROR_COLOR = "CC0000"
 _NOTE_COLOR = "856404"
 _MISMATCH_BG = "FFE0E0"
 
+# Achievement fill colors for the "Benötigt" column (Gesamt cell coloring).
+_ACH_GREEN  = "C6EFCE"   # >= 100 % of required
+_ACH_YELLOW = "FFEB9C"   # >= 80 %
+_ACH_ORANGE = "FFD966"   # >= 50 %
+_ACH_RED    = "FFC7CE"   # <  50 %
+
 _THIN = Side(style="thin")
 _BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
 
@@ -64,6 +70,23 @@ def _style_total_cell(cell, value) -> None:
     cell.border = _BORDER
 
 
+def _achievement_fill(actual: int, required: int) -> "PatternFill | None":
+    """Return a fill reflecting how close `actual` is to `required`. None on error."""
+    try:
+        if required <= 0:
+            return None
+        pct = actual / required
+        color = (
+            _ACH_GREEN  if pct >= 1.0 else
+            _ACH_YELLOW if pct >= 0.8 else
+            _ACH_ORANGE if pct >= 0.5 else
+            _ACH_RED
+        )
+        return PatternFill(start_color=color, end_color=color, fill_type="solid")
+    except Exception:
+        return None
+
+
 def _autofit_columns(ws, max_width: int = 60) -> None:
     for col in ws.columns:
         col_letter = get_column_letter(col[0].column)
@@ -74,7 +97,11 @@ def _autofit_columns(ws, max_width: int = 60) -> None:
         ws.column_dimensions[col_letter].width = min(best + 4, max_width)
 
 
-def save_output(result: dict, output_dir: str = ".") -> str:
+def save_output(
+    result: dict,
+    output_dir: str = ".",
+    reference_amounts: "dict[str, int] | None" = None,
+) -> str:
     """
     Creates an xlsx file from the processing result and saves it to `output_dir`.
 
@@ -113,14 +140,33 @@ def save_output(result: dict, output_dir: str = ".") -> str:
     ws.title = "Auswertung"
     ws.freeze_panes = "B2"  # freeze header row and section column
 
+    # Build a case-insensitive fallback lookup so minor capitalisation
+    # differences between the map and the reference file still match.
+    _ref: dict[str, int] = reference_amounts or {}
+    _ref_lower: dict[str, int] = {k.lower(): v for k, v in _ref.items()}
+    has_reference = bool(_ref)
+
+    def _lookup_required(section_name: str) -> "int | None":
+        try:
+            if section_name in _ref:
+                return _ref[section_name]
+            return _ref_lower.get(section_name.lower())
+        except Exception:
+            return None
+
     # ── Header row ────────────────────────────────────────────────────────────
     col_headers = ["Leistungsbereich"] + [str(y) for y in years] + ["Gesamt"]
+    if has_reference:
+        col_headers.append("Benötigt")
     for col_idx, header_text in enumerate(col_headers, 1):
         _style_header_cell(ws.cell(row=1, column=col_idx), header_text)
 
     ws.row_dimensions[1].height = 30
 
     # ── Data rows ─────────────────────────────────────────────────────────────
+    gesamt_col = len(years) + 2
+    benoetigt_col = gesamt_col + 1
+
     for row_offset, (section, year_data) in enumerate(data.items(), 2):
         _style_data_cell(ws.cell(row=row_offset, column=1), section)
 
@@ -130,10 +176,29 @@ def save_output(result: dict, output_dir: str = ".") -> str:
                 year_data.get(year, 0),
             )
 
-        _style_total_cell(
-            ws.cell(row=row_offset, column=len(years) + 2),
-            year_data.get("Total", 0),
-        )
+        actual_total = year_data.get("Total", 0)
+        gesamt_cell = ws.cell(row=row_offset, column=gesamt_col)
+        _style_total_cell(gesamt_cell, actual_total)
+
+        if has_reference:
+            required = _lookup_required(section)
+            try:
+                if required is not None:
+                    # Colour the Gesamt cell to show achievement level.
+                    fill = _achievement_fill(actual_total, required)
+                    if fill:
+                        gesamt_cell.fill = fill
+                    # Write the required amount next to Gesamt.
+                    req_cell = ws.cell(row=row_offset, column=benoetigt_col)
+                    req_cell.value = required
+                    req_cell.font = Font(bold=True)
+                    req_cell.alignment = Alignment(horizontal="right")
+                    req_cell.border = _BORDER
+                else:
+                    # No required amount for this section — empty bordered cell.
+                    ws.cell(row=row_offset, column=benoetigt_col).border = _BORDER
+            except Exception:
+                pass  # never let reference rendering break the output
 
     next_row = len(data) + 2  # first row after data
 
