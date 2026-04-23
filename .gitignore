@@ -1,0 +1,29 @@
+# Excel files — never commit patient/medical data
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+*.txt
+!requirements.txt
+
+# Output directory
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
