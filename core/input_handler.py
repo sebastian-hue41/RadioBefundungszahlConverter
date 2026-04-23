@@ -25,7 +25,12 @@ XlsxSource = Union[str, Path, bytes, io.BytesIO]
 
 MAX_FILE_SIZE_MB = 50
 MAX_DATA_ROWS = 500_000
+MAX_MAP_COLUMNS = 500
 ALLOWED_EXTENSIONS = {".xlsx"}
+
+# Zip bomb limits: per-entry ratio and total uncompressed budget.
+_MAX_ENTRY_RATIO = 50        # compressed → uncompressed inflation per zip entry
+_MAX_UNCOMPRESSED_MB = 200   # total uncompressed content across the whole archive
 
 # Cells/values starting with these chars are formula injection attempts.
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "|", "\t", "\r")
@@ -59,10 +64,27 @@ def _validate_zip_content(data: bytes, label: str) -> None:
     Inspect xlsx bytes as a zip archive.
     Shared by both the path-based and bytes-based validators.
     Raises FileValidationError on any problem.
+
+    Checks performed:
+      - Valid zip structure
+      - Presence of xl/workbook.xml (xlsx marker)
+      - Absence of VBA macros
+      - No path-traversal entry names (absolute paths or ".." components)
+      - No zip bomb: per-entry compression ratio and total uncompressed size
     """
     try:
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
-            names = zf.namelist()
+            infos = zf.infolist()
+            names = [i.filename for i in infos]
+
+            # Path traversal: reject absolute paths or parent-directory components.
+            for name in names:
+                parts = name.replace("\\", "/").split("/")
+                if name.startswith("/") or ".." in parts:
+                    raise FileValidationError(
+                        f"Zip entry contains a suspicious path {name!r}: {label}"
+                    )
+
             if "xl/workbook.xml" not in names:
                 raise FileValidationError(
                     f"File does not appear to be a valid xlsx (xl/workbook.xml missing): {label}"
@@ -71,6 +93,28 @@ def _validate_zip_content(data: bytes, label: str) -> None:
                 raise FileValidationError(
                     f"File contains VBA macros and cannot be processed safely: {label}"
                 )
+
+            # Zip bomb: per-entry inflation ratio.
+            total_uncompressed = 0
+            for info in infos:
+                total_uncompressed += info.file_size
+                if info.compress_size > 0 and info.file_size > 0:
+                    ratio = info.file_size / info.compress_size
+                    if ratio > _MAX_ENTRY_RATIO:
+                        raise FileValidationError(
+                            f"Zip entry {info.filename!r} has an extreme compression ratio "
+                            f"({ratio:.0f}:1) — possible zip bomb: {label}"
+                        )
+
+            # Zip bomb: total uncompressed budget.
+            max_bytes = _MAX_UNCOMPRESSED_MB * 1024 * 1024
+            if total_uncompressed > max_bytes:
+                raise FileValidationError(
+                    f"File total uncompressed content "
+                    f"({total_uncompressed // (1024 * 1024)} MB) "
+                    f"exceeds the {_MAX_UNCOMPRESSED_MB} MB limit: {label}"
+                )
+
     except zipfile.BadZipFile as exc:
         raise FileValidationError(
             f"File is not a valid xlsx archive (corrupt or disguised file): {label}"
@@ -478,6 +522,13 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
             raise MapValidationError(
                 "No section columns found starting from column F. "
                 "Please verify the map file structure."
+            )
+
+        if len(sections) > MAX_MAP_COLUMNS:
+            raise MapValidationError(
+                f"Map file contains {len(sections)} section columns, "
+                f"which exceeds the limit of {MAX_MAP_COLUMNS}. "
+                "Please verify the file is not malformed."
             )
 
         # ── Read leistung rows ─────────────────────────────────────────────
