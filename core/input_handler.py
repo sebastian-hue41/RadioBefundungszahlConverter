@@ -573,7 +573,11 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
             section_values: dict[str, int] = {}
             for section_name, col_idx in zip(sections, section_col_indices):
                 val = _get_map(col_idx)
-                section_values[section_name] = 1 if val == 1 else 0
+                try:
+                    int_val = int(val) if isinstance(val, (int, float)) else 0
+                    section_values[section_name] = int_val if int_val >= 1 else 0
+                except (TypeError, ValueError):
+                    section_values[section_name] = 0
 
             entry = {
                 "kurztext": kurztext,
@@ -598,7 +602,7 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
                 leistungen[leist0_str] = entries[0]
                 continue
 
-            has_values = [e for e in entries if any(v == 1 for v in e["sections"].values())]
+            has_values = [e for e in entries if any(v >= 1 for v in e["sections"].values())]
 
             if len(has_values) == 0:
                 # None have any section assigned — keep first, no harm done.

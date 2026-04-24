@@ -19,30 +19,82 @@ from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-# ── Styling constants ──────────────────────────────────────────────────────────
+# ── Palette ────────────────────────────────────────────────────────────────────
+# One dark accent (header only), one near-white accent (Gesamt/Benötigt),
+# and two text colours for severity. No fills in the footer.
 
-_HEADER_BG = "2F4F8F"
-_TOTAL_BG = "D9E1F2"
-_ERROR_COLOR = "CC0000"
-_NOTE_COLOR = "856404"
-_MISMATCH_BG = "FFE0E0"
+_FONT         = "Calibri"
 
-# Achievement fill colors for Gesamt cell when reference amounts are provided.
-_ACH_GREEN  = "C6EFCE"   # >= 100 % of required
-_ACH_YELLOW = "FFEB9C"   # >= 80 %
-_ACH_ORANGE = "FFD966"   # >= 50 %
-_ACH_RED    = "FFC7CE"   # <  50 %
+_HEADER_BG    = "1F3864"   # deep navy — header row only
+_ACCENT_BG    = "EEF2F7"   # very light blue-gray — Gesamt + Benötigt columns
+_SEP_C        = "A0AABB"   # medium gray — vertical separator before Gesamt
+_GRID_C       = "D8DCE3"   # light gray  — horizontal row lines
 
-_THIN = Side(style="thin")
-_BORDER = Border(left=_THIN, right=_THIN, top=_THIN, bottom=_THIN)
+_TEXT_BODY    = "1A1A2E"   # near-black  — section names and counts
+_TEXT_MUTED   = "6B7280"   # gray        — footnotes / info lines
+_TEXT_ERROR   = "C0392B"   # muted red   — errors
+_TEXT_WARN    = "A0522D"   # muted amber — warnings and notes
 
+# Achievement colours (soft pastels — used in conditional formatting rules)
+_ACH_GREEN    = "D5F5E3"   # ≥ 100 %
+_ACH_YELLOW   = "FCF3CF"   # ≥  80 %
+_ACH_ORANGE   = "FAE5D3"   # ≥  50 %
+_ACH_RED      = "FADBD8"   # <   50 %
+
+# ── Shared style objects ───────────────────────────────────────────────────────
+
+def _fill(hex_color: str) -> PatternFill:
+    return PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
+
+# Data row: light bottom line only (open-grid look)
+_ROW_BORDER = Border(bottom=Side(style="thin", color=_GRID_C))
+
+# Gesamt / Benötigt: same bottom line + a medium left separator
+_ACCENT_BORDER = Border(
+    left=Side(style="medium", color=_SEP_C),
+    bottom=Side(style="thin", color=_GRID_C),
+)
+
+# Header: slightly stronger bottom to close the header band
+_HEADER_BORDER = Border(bottom=Side(style="medium", color=_SEP_C))
+
+
+# ── Cell stylers ──────────────────────────────────────────────────────────────
+
+def _header_cell(cell, value: str, align: str = "center") -> None:
+    cell.value = value
+    cell.font = Font(name=_FONT, bold=True, size=11, color="FFFFFF")
+    cell.fill = _fill(_HEADER_BG)
+    cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
+    cell.border = _HEADER_BORDER
+
+
+def _section_cell(cell, value: str) -> None:
+    cell.value = value
+    cell.font = Font(name=_FONT, size=10, color=_TEXT_BODY)
+    cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    cell.border = _ROW_BORDER
+
+
+def _count_cell(cell, value: int) -> None:
+    cell.value = value
+    cell.font = Font(name=_FONT, size=10, color=_TEXT_BODY)
+    cell.alignment = Alignment(horizontal="right", vertical="center")
+    cell.border = _ROW_BORDER
+
+
+def _accent_cell(cell, value, bold: bool = True) -> None:
+    """Gesamt and Benötigt columns — subtle background, left separator."""
+    cell.value = value
+    cell.font = Font(name=_FONT, size=10, bold=bold, color=_TEXT_BODY)
+    cell.fill = _fill(_ACCENT_BG)
+    cell.alignment = Alignment(horizontal="right", vertical="center")
+    cell.border = _ACCENT_BORDER
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_filename(mitarbeiter: str | None, befunddatum: str | None) -> str:
-    """
-    Builds the output filename from metadata.
-    Falls back to a timestamped generic name when metadata is missing.
-    Strips spaces; keeps alphanumeric, underscores, and hyphens only.
-    """
     if mitarbeiter and befunddatum:
         clean = lambda s: re.sub(r"[^\w\-]", "", s.replace(" ", ""))
         name = f"{clean(mitarbeiter)}{clean(befunddatum)}Auswertung"
@@ -52,44 +104,17 @@ def _make_filename(mitarbeiter: str | None, befunddatum: str | None) -> str:
     return f"{name}.xlsx"
 
 
-def _style_header_cell(cell, value: str) -> None:
-    cell.value = value
-    cell.font = Font(bold=True, color="FFFFFF")
-    cell.fill = PatternFill(start_color=_HEADER_BG, end_color=_HEADER_BG, fill_type="solid")
-    cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    cell.border = _BORDER
-
-
-def _style_data_cell(cell, value, bold: bool = False) -> None:
-    cell.value = value
-    if bold:
-        cell.font = Font(bold=True)
-    cell.alignment = Alignment(horizontal="right" if isinstance(value, int) else "left")
-    cell.border = _BORDER
-
-
-def _style_total_cell(cell, value) -> None:
-    cell.value = value
-    cell.font = Font(bold=True)
-    cell.fill = PatternFill(start_color=_TOTAL_BG, end_color=_TOTAL_BG, fill_type="solid")
-    cell.alignment = Alignment(horizontal="right")
-    cell.border = _BORDER
-
-
-def _add_achievement_cf(ws, gesamt_col: int, benoetigt_col: int, first_row: int, last_row: int) -> None:
+def _add_achievement_cf(
+    ws, gesamt_col: int, benoetigt_col: int, first_row: int, last_row: int
+) -> None:
     """
-    Add conditional-formatting rules to the Gesamt column so Excel re-colours
-    cells dynamically whenever the user edits a Benötigt value.
-
-    Rules reference the Benötigt cell in the same row via a formula, so the
-    colour updates live — no need to regenerate the file after edits.
-    Priority order: green (highest) → yellow → orange → red.
+    Conditional formatting on the Gesamt column.
+    Colour updates live in Excel when the user edits Benötigt values.
     """
     try:
-        g = get_column_letter(gesamt_col)
-        b = get_column_letter(benoetigt_col)
+        g  = get_column_letter(gesamt_col)
+        b  = get_column_letter(benoetigt_col)
         cf_range = f"{g}{first_row}:{g}{last_row}"
-        # Formulas are written for the first row; Excel adjusts them per row.
         gf = f"{g}{first_row}"
         bf = f"{b}{first_row}"
         for formula, color in (
@@ -102,7 +127,7 @@ def _add_achievement_cf(ws, gesamt_col: int, benoetigt_col: int, first_row: int,
                 cf_range,
                 FormulaRule(
                     formula=[formula],
-                    fill=PatternFill(start_color=color, end_color=color, fill_type="solid"),
+                    fill=_fill(color),
                     stopIfTrue=True,
                 ),
             )
@@ -110,200 +135,204 @@ def _add_achievement_cf(ws, gesamt_col: int, benoetigt_col: int, first_row: int,
         pass  # CF is cosmetic — never let it break the file
 
 
-def _autofit_columns(ws, max_width: int = 60) -> None:
-    for col in ws.columns:
-        col_letter = get_column_letter(col[0].column)
-        best = max(
-            (len(str(cell.value)) for cell in col if cell.value is not None),
-            default=8,
-        )
-        ws.column_dimensions[col_letter].width = min(best + 4, max_width)
+def _set_column_widths(ws, n_years: int, gesamt_col: int, has_reference: bool) -> None:
+    """
+    Fixed widths: adaptive section-name column, compact fixed number columns.
+    Section names: measure actual content, cap at 45.
+    """
+    max_section_len = max(
+        (len(str(ws.cell(row=r, column=1).value or ""))
+         for r in range(2, ws.max_row + 1)),
+        default=20,
+    )
+    ws.column_dimensions["A"].width = min(max_section_len + 4, 45)
 
+    for col in range(2, gesamt_col):                                   # year columns
+        ws.column_dimensions[get_column_letter(col)].width = 11
+
+    ws.column_dimensions[get_column_letter(gesamt_col)].width = 13    # Gesamt
+
+    if has_reference:
+        ws.column_dimensions[get_column_letter(gesamt_col + 1)].width = 13  # Benötigt
+
+
+# ── Workbook builder ──────────────────────────────────────────────────────────
 
 def _build_workbook(
     result: dict,
     reference_amounts: "dict[str, int] | None" = None,
-) -> tuple[str, openpyxl.Workbook]:
+) -> "tuple[str, openpyxl.Workbook]":
     """
     Build an openpyxl Workbook from a processing result dict.
     Returns (filename, workbook) — no I/O performed.
     """
     filename = _make_filename(result.get("mitarbeiter"), result.get("befunddatum"))
 
-    years: list[int] = result["years"]
-    data: dict[str, dict] = result["data"]
-    errors: list[str] = result.get("errors", [])
-    total_counted: int = result.get("total_counted", 0)
-    total_leistungen: int | None = result.get("total_leistungen")
-    total_documents: int | None = result.get("total_documents")
-    merged_duplicates: list[str] = result.get("merged_duplicates", [])
+    years:             list[int]       = result["years"]
+    data:              dict[str, dict] = result["data"]
+    errors:            list[str]       = result.get("errors", [])
+    total_counted:     int             = result.get("total_counted", 0)
+    total_leistungen:  int | None      = result.get("total_leistungen")
+    total_documents:   int | None      = result.get("total_documents")
+    merged_duplicates: list[str]       = result.get("merged_duplicates", [])
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Auswertung"
-    ws.freeze_panes = "B2"  # freeze header row and section column
+    ws.freeze_panes = "B2"
 
-    # Build a case-insensitive fallback lookup so minor capitalisation
-    # differences between the map and the reference file still match.
-    _ref: dict[str, int] = reference_amounts or {}
+    _ref:       dict[str, int] = reference_amounts or {}
     _ref_lower: dict[str, int] = {k.lower(): v for k, v in _ref.items()}
     has_reference = bool(_ref)
 
     def _lookup_required(section_name: str) -> "int | None":
         try:
-            if section_name in _ref:
-                return _ref[section_name]
-            return _ref_lower.get(section_name.lower())
+            return _ref.get(section_name) or _ref_lower.get(section_name.lower())
         except Exception:
             return None
 
-    # ── Header row ────────────────────────────────────────────────────────────
+    gesamt_col    = len(years) + 2
+    benoetigt_col = gesamt_col + 1
+
     col_headers = ["Leistungsbereich"] + [str(y) for y in years] + ["Gesamt"]
     if has_reference:
         col_headers.append("Benötigt")
-    for col_idx, header_text in enumerate(col_headers, 1):
-        _style_header_cell(ws.cell(row=1, column=col_idx), header_text)
 
-    ws.row_dimensions[1].height = 30
+    # ── Header row ────────────────────────────────────────────────────────────
+    _header_cell(ws.cell(row=1, column=1), "Leistungsbereich", align="left")
+    for col_idx, text in enumerate(col_headers[1:], 2):
+        _header_cell(ws.cell(row=1, column=col_idx), text)
+    ws.row_dimensions[1].height = 34
 
     # ── Data rows ─────────────────────────────────────────────────────────────
-    gesamt_col = len(years) + 2
-    benoetigt_col = gesamt_col + 1
-
     for row_offset, (section, year_data) in enumerate(data.items(), 2):
-        _style_data_cell(ws.cell(row=row_offset, column=1), section)
+        _section_cell(ws.cell(row=row_offset, column=1), section)
 
         for col_offset, year in enumerate(years, 2):
-            _style_data_cell(
-                ws.cell(row=row_offset, column=col_offset),
-                year_data.get(year, 0),
-            )
+            _count_cell(ws.cell(row=row_offset, column=col_offset), year_data.get(year, 0))
 
-        actual_total = year_data.get("Total", 0)
-        gesamt_cell = ws.cell(row=row_offset, column=gesamt_col)
-        _style_total_cell(gesamt_cell, actual_total)
+        _accent_cell(ws.cell(row=row_offset, column=gesamt_col), year_data.get("Total", 0))
 
         if has_reference:
             required = _lookup_required(section)
             try:
-                if required is not None:
-                    req_cell = ws.cell(row=row_offset, column=benoetigt_col)
-                    req_cell.value = required
-                    req_cell.font = Font(bold=True)
-                    req_cell.alignment = Alignment(horizontal="right")
-                    req_cell.border = _BORDER
-                else:
-                    ws.cell(row=row_offset, column=benoetigt_col).border = _BORDER
+                _accent_cell(
+                    ws.cell(row=row_offset, column=benoetigt_col),
+                    required,          # None leaves cell blank but keeps styling
+                    bold=required is not None,
+                )
             except Exception:
-                pass  # never let reference rendering break the output
+                pass
 
-    # Conditional formatting on the entire Gesamt column — colours update live
-    # in Excel when the user edits a Benötigt cell (no file regeneration needed).
+        ws.row_dimensions[row_offset].height = 20
+
+    # Conditional formatting on Gesamt column (live colour in Excel)
     if has_reference and data:
-        _add_achievement_cf(ws, gesamt_col, benoetigt_col, first_row=2, last_row=len(data) + 1)
+        _add_achievement_cf(
+            ws, gesamt_col, benoetigt_col, first_row=2, last_row=len(data) + 1
+        )
 
-    next_row = len(data) + 2  # first row after data
+    # ── Column widths ─────────────────────────────────────────────────────────
+    _set_column_widths(ws, len(years), gesamt_col, has_reference)
 
-    # ── Count summary row ─────────────────────────────────────────────────────
-    next_row += 1
-    ws.cell(row=next_row, column=1).value = "Gezählte Leistungen:"
-    ws.cell(row=next_row, column=1).font = Font(bold=True)
-    ws.cell(row=next_row, column=2).value = total_counted
-    ws.cell(row=next_row, column=2).font = Font(bold=True)
+    # ── Footer ────────────────────────────────────────────────────────────────
+    next_row = len(data) + 3   # one blank row separates data from footer
 
-    # Befunddokumente (L8) = unique IND1 count — shown for reference only.
-    # It counts patient reports, not individual procedures, so no comparison is made.
+    # Count summary
+    lbl = ws.cell(row=next_row, column=1)
+    lbl.value = "Gezählte Leistungen:"
+    lbl.font = Font(name=_FONT, size=10, bold=True, color=_TEXT_BODY)
+
+    cnt = ws.cell(row=next_row, column=2)
+    cnt.value = total_counted
+    cnt.font = Font(name=_FONT, size=10, bold=True, color=_TEXT_BODY)
+    cnt.alignment = Alignment(horizontal="right")
+
+    # Befunddokumente (L8) — informational only, not a count of Leistungen
     if total_documents is not None:
         next_row += 1
-        ws.cell(row=next_row, column=1).value = "Befunddokumente (L8):"
-        ws.cell(row=next_row, column=1).font = Font(italic=True)
-        ws.cell(row=next_row, column=2).value = total_documents
-        ws.cell(row=next_row, column=2).font = Font(italic=True)
-        ws.cell(row=next_row, column=3).value = "(Anzahl Befundberichte / IND1 — nicht mit Leistungen vergleichbar)"
-        ws.cell(row=next_row, column=3).font = Font(italic=True, color="888888")
+        doc = ws.cell(row=next_row, column=1)
+        doc.value = (
+            f"Befunddokumente (L8):   {total_documents:,}"
+            "   —   Anzahl Befundberichte (IND1), nicht mit Leistungen vergleichbar"
+        )
+        doc.font = Font(name=_FONT, size=9, italic=True, color=_TEXT_MUTED)
+        ws.merge_cells(
+            start_row=next_row, start_column=1,
+            end_row=next_row, end_column=len(col_headers),
+        )
 
-    # Mismatch: only flag if processed rows != IND2-derived expected total.
+    # Count mismatch — text colour only, no background fill
     if total_leistungen is not None and total_counted != total_leistungen:
         skipped = total_leistungen - total_counted
         next_row += 1
-        mismatch_cell = ws.cell(row=next_row, column=1)
-        mismatch_cell.value = (
-            f"ABWEICHUNG: IND2-Algorithmus erwartet {total_leistungen:,} Leistungen; "
-            f"{skipped:,} Zeilen übersprungen"
+        mm = ws.cell(row=next_row, column=1)
+        mm.value = (
+            f"ABWEICHUNG: IND2-Algorithmus erwartet {total_leistungen:,} Leistungen "
+            f"— {skipped:,} Zeilen übersprungen"
         )
-        mismatch_cell.font = Font(bold=True, color=_ERROR_COLOR)
-        mismatch_cell.fill = PatternFill(
-            start_color=_MISMATCH_BG, end_color=_MISMATCH_BG, fill_type="solid"
+        mm.font = Font(name=_FONT, size=10, bold=True, color=_TEXT_ERROR)
+        ws.merge_cells(
+            start_row=next_row, start_column=1,
+            end_row=next_row, end_column=len(col_headers),
         )
+        ws.row_dimensions[next_row].height = 22
 
     # ── Merged duplicates notice ──────────────────────────────────────────────
     if merged_duplicates:
         next_row += 2
-        label_cell = ws.cell(row=next_row, column=1)
-        label_cell.value = "Hinweis: Doppelte Leistungsbezeichnungen (Ergebnisse möglicherweise ungenau)"
-        label_cell.font = Font(bold=True, size=11, color=_NOTE_COLOR)
+        hl = ws.cell(row=next_row, column=1)
+        hl.value = (
+            "Hinweis: Doppelte Leistungsbezeichnungen "
+            "— Werte wurden per Maximum zusammengeführt"
+        )
+        hl.font = Font(name=_FONT, size=10, bold=True, color=_TEXT_WARN)
         ws.merge_cells(
             start_row=next_row, start_column=1,
             end_row=next_row, end_column=len(col_headers),
         )
-
-        next_row += 1
-        desc_cell = ws.cell(row=next_row, column=1)
-        desc_cell.value = (
-            "Die folgenden Leistungsbezeichnungen kamen mehrfach mit widersprüchlichen "
-            "Zuordnungen in der Map vor. Die Werte wurden zeilenweise per Maximum zusammengeführt. "
-            "Bitte die Map-Datei prüfen und bereinigen."
-        )
-        desc_cell.alignment = Alignment(wrap_text=True)
-        desc_cell.font = Font(color=_NOTE_COLOR)
-        ws.merge_cells(
-            start_row=next_row, start_column=1,
-            end_row=next_row, end_column=len(col_headers),
-        )
-        ws.row_dimensions[next_row].height = 40
 
         for code in merged_duplicates:
             next_row += 1
-            cell = ws.cell(row=next_row, column=1)
-            cell.value = f"  - {code}"
-            cell.font = Font(color=_NOTE_COLOR)
+            c = ws.cell(row=next_row, column=1)
+            c.value = f"    •  {code}"
+            c.font = Font(name=_FONT, size=10, color=_TEXT_WARN)
 
     # ── Errors / warnings section ─────────────────────────────────────────────
     if errors:
         next_row += 2
-        label_cell = ws.cell(row=next_row, column=1)
-        label_cell.value = "Hinweise und Fehler:"
-        label_cell.font = Font(bold=True, size=11)
+        lbl = ws.cell(row=next_row, column=1)
+        lbl.value = "Hinweise und Fehler"
+        lbl.font = Font(name=_FONT, size=10, bold=True, color=_TEXT_BODY)
 
         for error_text in errors:
             next_row += 1
             cell = ws.cell(row=next_row, column=1)
             cell.value = error_text
             cell.alignment = Alignment(wrap_text=True)
+            ws.row_dimensions[next_row].height = 28
 
-            # Colour-code by severity prefix.
             if error_text.startswith("COUNT MISMATCH") or error_text.startswith("ERROR"):
-                cell.font = Font(color=_ERROR_COLOR)
+                cell.font = Font(name=_FONT, size=9, color=_TEXT_ERROR)
             elif error_text.startswith("WARNING"):
-                cell.font = Font(color=_NOTE_COLOR)
+                cell.font = Font(name=_FONT, size=9, color=_TEXT_WARN)
+            else:
+                cell.font = Font(name=_FONT, size=9, color=_TEXT_MUTED)
 
-            # Allow the error text to span multiple columns visually.
             ws.merge_cells(
-                start_row=next_row,
-                start_column=1,
-                end_row=next_row,
-                end_column=len(col_headers),
+                start_row=next_row, start_column=1,
+                end_row=next_row, end_column=len(col_headers),
             )
-            ws.row_dimensions[next_row].height = 30
 
-    _autofit_columns(ws)
     return filename, wb
 
+
+# ── Public entry points ───────────────────────────────────────────────────────
 
 def build_xlsx_bytes(
     result: dict,
     reference_amounts: "dict[str, int] | None" = None,
-) -> tuple[str, bytes]:
+) -> "tuple[str, bytes]":
     """
     Build the xlsx entirely in memory and return (filename, raw_bytes).
 

@@ -57,8 +57,8 @@ def process(stats_data: dict, map_data: dict) -> dict:
             map_entry = map_leistungen[leist_kurz]
             # An examination can belong to multiple sections simultaneously.
             for section_name, val in map_entry["sections"].items():
-                if val == 1:
-                    raw_counts[section_name][year] += 1
+                if val >= 1:
+                    raw_counts[section_name][year] += val
         else:
             # Not found in map — use Leistungsbezeichnung as the display key,
             # fall back to the code itself when the name is absent.
