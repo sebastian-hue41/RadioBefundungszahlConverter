@@ -24,6 +24,65 @@ The tool produces a single output xlsx with:
 
 ---
 
+## How it works
+
+### The two input files
+
+**statistics.xlsx** is the raw export from your RIS. Each row is one billed procedure (Leistung). A single patient visit can produce multiple rows.
+
+**map.xlsx** is a lookup table you maintain. It maps every procedure short code to one or more radiology sections and specifies how many times it counts there.
+
+### The four key columns
+
+| Column | Role |
+|---|---|
+| **Leist-Kurz** | Short procedure code — the key used to look up the section assignment in the map |
+| **DokDatum** | Date of the examination visit — used to assign each procedure to a year |
+| **IND1** | Patient/visit identifier — one value per patient visit |
+| **IND2** | Position of this procedure within the visit (1, 2, 3 …) |
+
+### Date carry-forward
+
+The RIS only writes `DokDatum` on the **first row of each visit** (IND2 = 1). All subsequent rows in the same visit leave it blank. The loader carries the last seen date forward automatically, so every procedure from the same visit is counted in the same year.
+
+### How IND2 computes the expected total
+
+Rather than counting rows (which can be skipped for bad dates or missing codes), the tool derives an independent expected total from the IND2 sequence alone.
+
+Walk the IND2 values in order. Whenever the next value is **≤ the current value** — or the list ends — the current row is the last in its group, and its IND2 value is exactly the group's size. Sum those values.
+
+```
+IND2 sequence:  1  2  3 │ 1  2 │ 1
+                         ↑     ↑     ← group boundaries (next ≤ current or end)
+Group sizes:       3       2     1   →  total = 6
+```
+
+After loading, the number of successfully processed rows is compared against this total. Any discrepancy means rows were silently dropped (bad date, missing Leist-Kurz) and is flagged in the output footer.
+
+### Map lookup and section counting
+
+For each loaded examination, the tool looks up its `Leist-Kurz` in the map:
+
+- **Found** — for every section in the map entry where the weight `val ≥ 1`, add `val` to that section's counter for that year. A weight of `2` means one procedure counts twice — used for multi-region scans that are billed separately for each body region.
+- **Not found** — the procedure is appended as its own row using its human-readable `Leistung` name, so nothing is silently lost.
+
+### End-to-end summary
+
+```
+statistics.xlsx
+  ├─ IND2 sequence  ──────────────────────────→  expected total (cross-check)
+  ├─ DokDatum  ──→  carry-forward  ──────────→  year per row
+  └─ Leist-Kurz  ─────────────────────┐
+                                       ↓
+map.xlsx:  Leist-Kurz → {section: weight, …}
+                                       ↓
+                        counts[section][year] += weight
+                                       ↓
+                        output.xlsx: section rows × year columns
+```
+
+---
+
 ## Architecture
 
 ```
