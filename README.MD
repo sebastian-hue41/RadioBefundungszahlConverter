@@ -9,18 +9,19 @@ Available as a **CLI tool** (master branch) and as an **iii web worker** (this b
 ## Table of contents
 
 1. [What it does](#what-it-does)
-2. [Package structure](#package-structure)
-3. [CLI usage](#cli-usage)
-4. [Web integration (iii)](#web-integration-iii)
+2. [How it works](#how-it-works)
+3. [Package structure](#package-structure)
+4. [CLI usage](#cli-usage)
+5. [Web integration (iii)](#web-integration-iii)
    - [What is iii?](#what-is-iii)
    - [Prerequisites](#prerequisites-web)
    - [Running the worker](#running-the-worker)
    - [HTTP API](#http-api)
    - [Calling the API](#calling-the-api)
-5. [Input file requirements](#input-file-requirements)
-6. [Reference amounts and colour coding](#reference-amounts-and-colour-coding)
-7. [Error handling](#error-handling)
-8. [Security](#security)
+6. [Input file requirements](#input-file-requirements)
+7. [Reference amounts and colour coding](#reference-amounts-and-colour-coding)
+8. [Error handling](#error-handling)
+9. [Security](#security)
 
 ---
 
@@ -43,6 +44,65 @@ The tool produces a single output xlsx with:
 - A footer section notes any count discrepancies, merged map duplicates, and warnings
 
 The output xlsx is built **entirely in memory** — no files are written to disk on the server.
+
+---
+
+## How it works
+
+### The two input files
+
+**statistics.xlsx** is the raw export from your RIS. Each row is one billed procedure (Leistung). A single patient visit can produce multiple rows.
+
+**map.xlsx** is a lookup table you maintain. It maps every procedure short code to one or more radiology sections and specifies how many times it counts there.
+
+### The four key columns
+
+| Column | Role |
+|---|---|
+| **Leist-Kurz** | Short procedure code — the key used to look up the section assignment in the map |
+| **DokDatum** | Date of the examination visit — used to assign each procedure to a year |
+| **IND1** | Patient/visit identifier — one value per patient visit |
+| **IND2** | Position of this procedure within the visit (1, 2, 3 …) |
+
+### Date carry-forward
+
+The RIS only writes `DokDatum` on the **first row of each visit** (IND2 = 1). All subsequent rows in the same visit leave it blank. The loader carries the last seen date forward automatically, so every procedure from the same visit is counted in the same year.
+
+### How IND2 computes the expected total
+
+Rather than counting rows (which can be skipped for bad dates or missing codes), the tool derives an independent expected total from the IND2 sequence alone.
+
+Walk the IND2 values in order. Whenever the next value is **≤ the current value** — or the list ends — the current row is the last in its group, and its IND2 value is exactly the group's size. Sum those values.
+
+```
+IND2 sequence:  1  2  3 │ 1  2 │ 1
+                         ↑     ↑     ← group boundaries (next ≤ current or end)
+Group sizes:       3       2     1   →  total = 6
+```
+
+After loading, the number of successfully processed rows is compared against this total. Any discrepancy means rows were silently dropped (bad date, missing Leist-Kurz) and is flagged in the output footer.
+
+### Map lookup and section counting
+
+For each loaded examination, the tool looks up its `Leist-Kurz` in the map:
+
+- **Found** — for every section in the map entry where the weight `val ≥ 1`, add `val` to that section's counter for that year. A weight of `2` means one procedure counts twice — used for multi-region scans that are billed separately for each body region.
+- **Not found** — the procedure is appended as its own row using its human-readable `Leistung` name, so nothing is silently lost.
+
+### End-to-end summary
+
+```
+statistics.xlsx
+  ├─ IND2 sequence  ──────────────────────────→  expected total (cross-check)
+  ├─ DokDatum  ──→  carry-forward  ──────────→  year per row
+  └─ Leist-Kurz  ─────────────────────┐
+                                       ↓
+map.xlsx:  Leist-Kurz → {section: weight, …}
+                                       ↓
+                        counts[section][year] += weight
+                                       ↓
+                        output.xlsx: section rows × year columns
+```
 
 ---
 
