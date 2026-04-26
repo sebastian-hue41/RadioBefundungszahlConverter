@@ -31,9 +31,9 @@ Given two required input files (and one optional reference file):
 
 | File | Required | Content |
 |---|---|---|
-| `statistics.xlsx` | Yes | Raw examination log exported from the RIS — one row per individual Leistung, grouped by patient visit (IND1/IND2 indices) |
-| `map.xlsx` | Yes | Lookup table mapping every procedure code (`Leist0`) to one or more radiology sections (e.g. MRT, CT Hals/Thorax, US gesamt) |
-| `reference_amount.xlsx` | No | Required examination counts per section — adds a colour-coded **Benötigt** column to the output |
+| `statistics.xlsx` | Uploaded by user | Raw examination log exported from the RIS — one row per individual Leistung, grouped by patient visit (IND1/IND2 indices) |
+| `map.xlsx` | Server-side only | Lookup table mapping every procedure code (`Leist0`) to one or more radiology sections — confidential, never uploaded by clients |
+| `reference_amount.xlsx` | Uploaded by user (optional) | Required examination counts per section — adds a colour-coded **Benötigt** column to the output |
 
 The tool produces a single output xlsx with:
 - **Rows** — radiology sections from the map (e.g. MRT, US gesamt, Mamma gesamt)
@@ -198,6 +198,8 @@ Environment variables:
 |---|---|---|
 | `III_ENGINE_URL` | `ws://localhost:49134` | WebSocket URL of the iii engine |
 | `WORKER_NAME` | `befundungszahl-converter` | Display name shown in the iii console |
+| `MAP_FILE` | `map.xlsx` | Path to the server-side map file (confidential — never uploaded by clients) |
+| `INCLUDE_UNDERSCORE_COLUMNS` | `false` | Set to `true` to include `_`-prefixed section columns from the map |
 
 The worker registers itself with the engine on startup and logs a ready message:
 
@@ -216,21 +218,14 @@ POST http://<engine-host>/convert
 
 #### `POST /convert`
 
-Upload the statistics and map files as `multipart/form-data`. The server processes them in memory and returns the output xlsx as a binary download — nothing is written to disk.
+Upload the statistics file as `multipart/form-data`. The map is loaded server-side — clients never supply it. The server processes everything in memory and returns the output xlsx as a binary download — nothing is written to disk.
 
 **Request fields:**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `statistics` | file (`.xlsx`) | Yes | MitarbeiterStatistik export from the RIS |
-| `map` | file (`.xlsx`) | Yes | Leistungen map file |
 | `reference` | file (`.xlsx`) | No | Required amounts per section; adds colour-coded Benötigt column |
-
-**Query parameters:**
-
-| Parameter | Default | Description |
-|---|---|---|
-| `include_underscore` | `false` | Set to `true` to include `_`-prefixed section columns from the map |
 
 **Responses:**
 
@@ -255,23 +250,15 @@ Error responses have the shape:
 #### curl
 
 ```bash
-# Minimal — statistics + map only
+# Minimal — statistics only
 curl -X POST http://localhost:<engine-port>/convert \
   -F "statistics=@2024_Statistik_KUNZ_A.xlsx" \
-  -F "map=@mapped_leistungen.xlsx" \
   --output Auswertung.xlsx
 
 # With reference amounts (Benötigt column + colour coding)
 curl -X POST http://localhost:<engine-port>/convert \
   -F "statistics=@2024_Statistik_KUNZ_A.xlsx" \
-  -F "map=@mapped_leistungen.xlsx" \
   -F "reference=@reference_amount.xlsx" \
-  --output Auswertung.xlsx
-
-# Include underscore-prefixed map columns
-curl -X POST "http://localhost:<engine-port>/convert?include_underscore=true" \
-  -F "statistics=@2024_Statistik_KUNZ_A.xlsx" \
-  -F "map=@mapped_leistungen.xlsx" \
   --output Auswertung.xlsx
 ```
 
@@ -282,15 +269,13 @@ import requests
 
 with (
     open("2024_Statistik_KUNZ_A.xlsx", "rb") as stats,
-    open("mapped_leistungen.xlsx", "rb") as map_file,
     open("reference_amount.xlsx", "rb") as ref,
 ):
     response = requests.post(
         "http://localhost:<engine-port>/convert",
         files={
             "statistics": ("statistics.xlsx", stats, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            "map":        ("map.xlsx",        map_file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            "reference":  ("reference.xlsx",  ref,      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            "reference":  ("reference.xlsx",  ref,   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         },
     )
     response.raise_for_status()

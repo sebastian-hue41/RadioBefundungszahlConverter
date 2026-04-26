@@ -5,21 +5,23 @@ Entrypoint:
     python -m web.worker          (from the project root)
 
 Environment variables:
-    III_ENGINE_URL   WebSocket URL of the iii engine (default: ws://localhost:49134)
-    WORKER_NAME      Display name shown in the iii console   (default: befundungszahl-converter)
+    III_ENGINE_URL             WebSocket URL of the iii engine (default: ws://localhost:49134)
+    WORKER_NAME                Display name shown in the iii console (default: befundungszahl-converter)
+    MAP_FILE                   Path to the server-side map xlsx (default: map.xlsx)
+    INCLUDE_UNDERSCORE_COLUMNS Set to "true" to include _-prefixed map columns (default: false)
+
+The map file is confidential and lives on the server — it is never uploaded by clients.
 
 HTTP API:
     POST /convert
         Content-Type: multipart/form-data
         Fields:
-            statistics   — the MitarbeiterStatistik .xlsx file
-            map          — the Leistungen map .xlsx file
-        Query params:
-            include_underscore=true   (optional) include _-prefixed map columns
+            statistics   — the MitarbeiterStatistik .xlsx file (required)
+            reference    — required amounts per section (optional)
 
         Response 200: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
             Content-Disposition: attachment; filename="..."
-        Response 400: application/json  {"error": "..."}  — bad request / missing fields
+        Response 400: application/json  {"error": "..."}  — bad request / missing field
         Response 413: application/json  {"error": "..."}  — upload too large
         Response 422: application/json  {"error": "..."}  — validation failure
         Response 500: application/json  {"error": "..."}  — unexpected server error
@@ -64,12 +66,25 @@ _XLSX_CONTENT_TYPE = (
 )
 _CHUNK_SIZE = 64 * 1024  # 64 KB
 
-# Two files at the per-file limit plus generous multipart framing overhead.
+# statistics + optional reference, plus generous multipart framing overhead.
 _MAX_BODY_BYTES = (2 * MAX_FILE_SIZE_MB + 10) * 1024 * 1024
 
-# Maximum number of accepted multipart fields (statistics + map = 2; a few extra
-# for leniency with browsers that add metadata fields).
+# Maximum number of accepted multipart fields (statistics + reference = 2; a few
+# extra for leniency with browsers that add metadata fields).
 _MAX_FIELDS = 10
+
+# ── Server-side map — loaded once at startup ───────────────────────────────────
+# The map file is confidential and must not be user-supplied.
+_MAP_DATA: dict | None = None
+
+
+def _load_server_map() -> dict:
+    map_path = os.environ.get("MAP_FILE", "map.xlsx")
+    include_underscore = (
+        os.environ.get("INCLUDE_UNDERSCORE_COLUMNS", "false").strip().lower() == "true"
+    )
+    log.info("Loading server-side map from %s (include_underscore=%s)", map_path, include_underscore)
+    return load_map(map_path, include_underscore_columns=include_underscore)
 
 # Wall-clock budget for the entire request (read + parse + process + write).
 _PROCESSING_TIMEOUT_S = 60.0
@@ -166,7 +181,7 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
     if "multipart/form-data" not in content_type:
         await _send_json_error(
             res, 400,
-            "Expected multipart/form-data with 'statistics' and 'map' fields.",
+            "Expected multipart/form-data with a 'statistics' field.",
         )
         return
 
@@ -182,34 +197,22 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
         return
 
     stats_bytes = fields.get("statistics")
-    map_bytes = fields.get("map")
 
     if not stats_bytes:
         await _send_json_error(res, 400, "Missing required field: 'statistics'.")
-        return
-    if not map_bytes:
-        await _send_json_error(res, 400, "Missing required field: 'map'.")
         return
 
     # Per-field size check (defence-in-depth: validate_xlsx_bytes also checks,
     # but catching it here gives a cleaner 413 rather than a 422).
     per_field_limit = MAX_FILE_SIZE_MB * 1024 * 1024
-    for field_name, field_bytes in (("statistics", stats_bytes), ("map", map_bytes)):
-        if len(field_bytes) > per_field_limit:
-            await _send_json_error(
-                res, 413,
-                f"Field '{field_name}' is too large "
-                f"({len(field_bytes) // (1024 * 1024)} MB). "
-                f"Maximum is {MAX_FILE_SIZE_MB} MB per file.",
-            )
-            return
-
-    # ── Optional query params ─────────────────────────────────────────────────
-    include_underscore_raw = req.query_params.get("include_underscore", "false")
-    if isinstance(include_underscore_raw, list):
-        include_underscore_raw = include_underscore_raw[0]
-    # Treat only the literal string "true" as truthy — anything else is false.
-    include_underscore = include_underscore_raw.strip().lower() == "true"
+    if len(stats_bytes) > per_field_limit:
+        await _send_json_error(
+            res, 413,
+            f"Field 'statistics' is too large "
+            f"({len(stats_bytes) // (1024 * 1024)} MB). "
+            f"Maximum is {MAX_FILE_SIZE_MB} MB per file.",
+        )
+        return
 
     # ── Optional reference amounts (never fatal — silently omitted if absent) ──
     reference_amounts: dict[str, int] = {}
@@ -223,7 +226,7 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
 
     # ── Core processing (no disk I/O) ─────────────────────────────────────────
     stats_data = load_statistics(io.BytesIO(stats_bytes))
-    map_data = load_map(io.BytesIO(map_bytes), include_underscore_columns=include_underscore)
+    map_data = _MAP_DATA  # server-side map loaded at startup
     result = process(stats_data, map_data)
     filename, xlsx_bytes = build_xlsx_bytes(result, reference_amounts=reference_amounts or None)
 
@@ -273,6 +276,11 @@ async def handle_convert(req: HttpRequest, res: HttpResponse) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+
+    global _MAP_DATA
+    _MAP_DATA = _load_server_map()
+    log.info("Map loaded: %d section(s), %d leistung(en)",
+             len(_MAP_DATA["sections"]), len(_MAP_DATA["leistungen"]))
 
     engine_url = os.environ.get("III_ENGINE_URL", "ws://localhost:49134")
     worker_name = os.environ.get("WORKER_NAME", "befundungszahl-converter")
