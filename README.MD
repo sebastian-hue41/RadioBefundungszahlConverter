@@ -124,16 +124,16 @@ python main.py <statistics.xlsx> <map.xlsx> [options]
 
 ```bash
 # Basic usage — auto-detects reference_amount.xlsx in the current directory
-python main.py 2024_Statistik_KUNZ_A.xlsx mapped_leistungen.xlsx
+python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx
 
 # Save output to a specific folder
-python main.py 2024_Statistik_KUNZ_A.xlsx mapped_leistungen.xlsx --output ./reports
+python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --output ./reports
 
 # Specify a custom reference file
-python main.py 2024_Statistik_KUNZ_A.xlsx mapped_leistungen.xlsx --reference targets_2024.xlsx
+python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --reference targets_2024.xlsx
 
 # Include internal map columns
-python main.py 2024_Statistik_KUNZ_A.xlsx mapped_leistungen.xlsx --include-underscore
+python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --include-underscore
 ```
 
 ### Output filename
@@ -144,7 +144,7 @@ The output file is named automatically from the statistics file metadata:
 {Mitarbeiter}{Befunddatum}Auswertung.xlsx
 ```
 
-Example: `KUNZ_A01042019-31122022Auswertung.xlsx`
+Example: `DR_EXAMPLE01042019-31122022Auswertung.xlsx`
 
 If the metadata cannot be read, a timestamped generic name is used and a note is added to the output file.
 
