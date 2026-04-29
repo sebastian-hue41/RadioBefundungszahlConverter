@@ -6,13 +6,13 @@ A CLI tool that generates a **Facharzt-Auswertung** xlsx report for Radiology by
 
 ## What it does
 
-Given two required input files (and one optional reference file):
+Given one user-supplied input file and two confidential administrator-managed files:
 
-| File | Required | Content |
+| File | Source | Content |
 |---|---|---|
-| `statistics.xlsx` | Yes | Raw examination log exported from the RIS — one row per individual Leistung, grouped by patient visit (IND1/IND2 indices) |
-| `map.xlsx` | Yes | Lookup table mapping every procedure code (`Leist0`) to one or more radiology sections (e.g. MRT, CT Hals/Thorax, US gesamt) |
-| `reference_amount.xlsx` | No | Required examination counts per section — adds a colour-coded **Benötigt** column to the output |
+| `statistics.xlsx` | Provided by physician | Raw examination log exported from the RIS — one row per individual Leistung, grouped by patient visit (IND1/IND2 indices) |
+| `map.xlsx` | Administrator-managed | Lookup table mapping every procedure code (`Leist0`) to one or more radiology sections (e.g. MRT, CT Hals/Thorax, US gesamt) — confidential |
+| `reference_amount.xlsx` | Administrator-managed | Required examination counts per section — adds a colour-coded **Benötigt** column to the output — confidential |
 
 The tool produces a single output xlsx with:
 - **Rows** — radiology sections from the map (e.g. MRT, US gesamt, Mamma gesamt)
@@ -164,6 +164,12 @@ Exported from the RIS (e.g. ORBIS MitarbeiterStatistik). Expected structure:
 
 The tool counts total Leistungen using an IND2-based group-end algorithm: when the next IND2 value is ≤ the current, the current row ends its group and its IND2 value is the group size.
 
+---
+
+## Server side file requirements
+
+These files are **confidential** and managed by the administrator. They must not be supplied by end users. The administrator provides their paths as CLI arguments or the tool auto-detects them.
+
 ### map.xlsx (Leistungen Map)
 
 A mapping table. Expected structure:
@@ -175,23 +181,26 @@ A mapping table. Expected structure:
 
 Duplicate procedure codes are resolved automatically: if both entries have section assignments, values are merged by taking the maximum per column. A warning is written to the output noting which codes were affected.
 
-### reference_amount.xlsx (optional)
+### reference_amount.xlsx
 
-A two-column file with required examination counts per section:
+Required examination counts per section. Controls the **Benötigt** column and colour-coded output. Expected structure:
 
-| Column A | Column B |
-|---|---|
-| Leistungsbereich | Benötigt |
-| MRT | 3000 |
-| CT Skelett | 4000 |
-| CT Hals/Thorax | 4000 |
-| … | … |
+| Column A | Column B | Column C |
+|---|---|---|
+| Leistungsbereich | Benötigt | Includiert (optional) |
+| MRT | 3000 | |
+| Interventionen | | Vask. Intervention; non-vask Intervention |
+| … | … | … |
 
-- Sections with an empty **Benötigt** cell are silently skipped
-- The file is auto-detected as `reference_amount.xlsx` in the current working directory; override with `--reference`
-- If the file is absent the **Benötigt** column is omitted from the output entirely
+- **Column A** — section name (must match a section column in the map)
+- **Column B** — required count (positive integer); rows with an empty Benötigt cell are tracked for ordering but receive no target
+- **Column C** — optional semicolon-separated list of component sections for a **combination row**: a virtual row that aggregates multiple map sections; the individual component sections are not removed from the output
 
-#### Colour coding
+The file is auto-detected as `reference_amount.xlsx` in the current working directory; override with `--reference`. If the file is absent the **Benötigt** column and colour coding are omitted from the output entirely.
+
+---
+
+## Reference amounts and colour coding
 
 When reference data is present, the **Gesamt** cell for each section is colour-coded using Excel **conditional formatting** — the colour updates live when you edit a Benötigt value directly in the output file, without needing to regenerate it.
 
@@ -231,7 +240,7 @@ The tool is designed to be robust by default:
 
 ## Security
 
-All input files — including the optional reference file — are treated as potentially malicious:
+All input files are treated as potentially malicious:
 
 - File extension is validated (`.xlsx` only)
 - The zip container is inspected — corrupt or disguised files are rejected
