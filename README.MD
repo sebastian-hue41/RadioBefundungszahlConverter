@@ -19,21 +19,22 @@ Available as a **CLI tool** (master branch) and as an **iii web worker** (this b
    - [HTTP API](#http-api)
    - [Calling the API](#calling-the-api)
 6. [Input file requirements](#input-file-requirements)
-7. [Reference amounts and colour coding](#reference-amounts-and-colour-coding)
-8. [Error handling](#error-handling)
-9. [Security](#security)
+7. [Server side file requirements](#server-side-file-requirements)
+8. [Reference amounts and colour coding](#reference-amounts-and-colour-coding)
+9. [Error handling](#error-handling)
+10. [Security](#security)
 
 ---
 
 ## What it does
 
-Given two required input files (and one optional reference file):
+Given one user-supplied input file and two confidential server-side files:
 
-| File | Required | Content |
+| File | Source | Content |
 |---|---|---|
 | `statistics.xlsx` | Uploaded by user | Raw examination log exported from the RIS — one row per individual Leistung, grouped by patient visit (IND1/IND2 indices) |
 | `map.xlsx` | Server-side only | Lookup table mapping every procedure code (`Leist0`) to one or more radiology sections — confidential, never uploaded by clients |
-| `reference_amount.xlsx` | Uploaded by user (optional) | Required examination counts per section — adds a colour-coded **Benötigt** column to the output |
+| `reference_amount.xlsx` | Server-side only | Required examination counts per section — adds a colour-coded **Benötigt** column to the output; confidential, never uploaded by clients |
 
 The tool produces a single output xlsx with:
 - **Rows** — radiology sections from the map (e.g. MRT, US gesamt, Mamma gesamt)
@@ -198,7 +199,8 @@ Environment variables:
 |---|---|---|
 | `III_ENGINE_URL` | `ws://localhost:49134` | WebSocket URL of the iii engine |
 | `WORKER_NAME` | `befundungszahl-converter` | Display name shown in the iii console |
-| `MAP_FILE` | `map.xlsx` | Path to the server-side map file (confidential — never uploaded by clients) |
+| `MAP_FILE` | `map.xlsx` | Path to the server-side map file |
+| `REFERENCE_FILE` | `reference_amount.xlsx` | Path to the server-side reference amounts file |
 | `INCLUDE_UNDERSCORE_COLUMNS` | `false` | Set to `true` to include `_`-prefixed section columns from the map |
 
 The worker registers itself with the engine on startup and logs a ready message:
@@ -225,7 +227,6 @@ Upload the statistics file as `multipart/form-data`. The map is loaded server-si
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `statistics` | file (`.xlsx`) | Yes | MitarbeiterStatistik export from the RIS |
-| `reference` | file (`.xlsx`) | No | Required amounts per section; adds colour-coded Benötigt column |
 
 **Responses:**
 
@@ -233,7 +234,7 @@ Upload the statistics file as `multipart/form-data`. The map is loaded server-si
 |---|---|---|
 | `200` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | Output xlsx file as a binary stream |
 | `400` | `application/json` | Bad request — missing required field or wrong content type |
-| `413` | `application/json` | Upload too large (> 50 MB per file, > 110 MB total) |
+| `413` | `application/json` | Upload too large (> 50 MB for the statistics file, > 60 MB total body) |
 | `422` | `application/json` | Validation failure — file is malformed, malicious, or structurally invalid |
 | `500` | `application/json` | Unexpected server error |
 | `503` | `application/json` | Processing timed out (> 60 s) |
@@ -250,15 +251,8 @@ Error responses have the shape:
 #### curl
 
 ```bash
-# Minimal — statistics only
 curl -X POST http://localhost:<engine-port>/convert \
   -F "statistics=@2024_Statistik_DR_EXAMPLE.xlsx" \
-  --output Auswertung.xlsx
-
-# With reference amounts (Benötigt column + colour coding)
-curl -X POST http://localhost:<engine-port>/convert \
-  -F "statistics=@2024_Statistik_DR_EXAMPLE.xlsx" \
-  -F "reference=@reference_amount.xlsx" \
   --output Auswertung.xlsx
 ```
 
@@ -267,15 +261,11 @@ curl -X POST http://localhost:<engine-port>/convert \
 ```python
 import requests
 
-with (
-    open("2024_Statistik_DR_EXAMPLE.xlsx", "rb") as stats,
-    open("reference_amount.xlsx", "rb") as ref,
-):
+with open("2024_Statistik_DR_EXAMPLE.xlsx", "rb") as stats:
     response = requests.post(
         "http://localhost:<engine-port>/convert",
         files={
             "statistics": ("statistics.xlsx", stats, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            "reference":  ("reference.xlsx",  ref,   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         },
     )
     response.raise_for_status()
@@ -299,6 +289,12 @@ Exported from the RIS (e.g. ORBIS MitarbeiterStatistik). Expected structure:
 
 The tool counts total Leistungen using an IND2-based group-end algorithm: when the next IND2 value is ≤ the current, the current row ends its group and its IND2 value is the group size.
 
+---
+
+## Server side file requirements
+
+These files are **confidential** and reside on the server. Clients never upload or interact with them directly. Administrators configure their paths via environment variables.
+
 ### map.xlsx (Leistungen Map)
 
 A mapping table. Expected structure:
@@ -310,25 +306,30 @@ A mapping table. Expected structure:
 
 Duplicate procedure codes are resolved automatically: if both entries have section assignments, values are merged by taking the maximum per column. A warning is written to the output noting which codes were affected.
 
+Configured via the `MAP_FILE` environment variable (default: `map.xlsx`).
+
+### reference_amount.xlsx
+
+Required examination counts per section. Controls the **Benötigt** column and colour-coded output. Expected structure:
+
+| Column A | Column B | Column C |
+|---|---|---|
+| Leistungsbereich | Benötigt | Includiert (optional) |
+| MRT | 3000 | |
+| Interventionen | | Vask. Intervention; non-vask Intervention |
+| … | … | … |
+
+- **Column A** — section name (must match a section column in the map)
+- **Column B** — required count (positive integer); rows with an empty Benötigt cell are tracked for ordering but receive no target
+- **Column C** — optional semicolon-separated list of component sections for a **combination row**: a virtual row that aggregates multiple map sections; the individual component sections are not removed from the output
+
+Configured via the `REFERENCE_FILE` environment variable (default: `reference_amount.xlsx`). If the file is absent or unreadable, the Benötigt column and colour coding are omitted and processing continues normally.
+
 ---
 
 ## Reference amounts and colour coding
 
-### reference_amount.xlsx format
-
-A two-column file with required examination counts per section:
-
-| Column A | Column B |
-|---|---|
-| Leistungsbereich | Benötigt |
-| MRT | 3000 |
-| CT Skelett | 4000 |
-| CT Hals/Thorax | 4000 |
-| … | … |
-
-- Sections with an empty **Benötigt** cell are silently skipped
-- The **Benötigt** column only appears in the output when reference data is present
-- If the file (or upload field) is absent, the column is omitted entirely
+When reference data is present (loaded server-side from `reference_amount.xlsx`), the output includes a **Benötigt** column and conditional colour coding on the **Gesamt** cell. See [Server side file requirements](#server-side-file-requirements) for the file format.
 
 ### Colour coding
 
@@ -356,21 +357,21 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 | Duplicate map entries, identical | Silently deduplicated |
 | Formula injection in cells | Fatal error — file rejected as potentially malicious |
 | VBA macros in file | Fatal error — file rejected |
-| File > 50 MB | Fatal error (CLI) / 413 response (web) |
+| File > 50 MB | Fatal error (CLI) / 413 response (web) — applies to the statistics upload |
 | Rows with unparseable dates | Skipped with a per-row warning; noted in output |
 | Count mismatch (processed ≠ expected) | Non-fatal; noted in output footer |
-| Reference file not found / not uploaded | Benötigt column omitted; processing continues normally |
+| Reference file not found or unreadable | Benötigt column omitted; processing continues normally |
 | Reference file fails security check | Logged as warning; Benötigt column omitted |
 | Individual reference row unparseable | That row skipped; rest of reference data used |
 | Section has no reference entry | Gesamt cell uncoloured; Benötigt cell left blank |
-| Request body > 110 MB | 413 before file is read into memory |
+| Request body > 60 MB | 413 before file is read into memory |
 | Processing timeout (> 60 s) | 503 response; worker continues serving other requests |
 
 ---
 
 ## Security
 
-All input files — including the optional reference file — are treated as potentially malicious:
+All user-uploaded files are treated as potentially malicious. Server-side files (map, reference) are validated on load with the same checks:
 
 - File extension is validated (`.xlsx` only)
 - The zip container is inspected — corrupt or disguised files are rejected

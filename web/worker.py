@@ -8,16 +8,17 @@ Environment variables:
     III_ENGINE_URL             WebSocket URL of the iii engine (default: ws://localhost:49134)
     WORKER_NAME                Display name shown in the iii console (default: befundungszahl-converter)
     MAP_FILE                   Path to the server-side map xlsx (default: map.xlsx)
+    REFERENCE_FILE             Path to the server-side reference xlsx (default: reference_amount.xlsx)
     INCLUDE_UNDERSCORE_COLUMNS Set to "true" to include _-prefixed map columns (default: false)
 
-The map file is confidential and lives on the server — it is never uploaded by clients.
+Both the map and reference files are confidential and live on the server — they are never
+uploaded by clients.
 
 HTTP API:
     POST /convert
         Content-Type: multipart/form-data
         Fields:
             statistics   — the MitarbeiterStatistik .xlsx file (required)
-            reference    — required amounts per section (optional)
 
         Response 200: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
             Content-Disposition: attachment; filename="..."
@@ -66,16 +67,17 @@ _XLSX_CONTENT_TYPE = (
 )
 _CHUNK_SIZE = 64 * 1024  # 64 KB
 
-# statistics + optional reference, plus generous multipart framing overhead.
-_MAX_BODY_BYTES = (2 * MAX_FILE_SIZE_MB + 10) * 1024 * 1024
+# statistics only, plus generous multipart framing overhead.
+_MAX_BODY_BYTES = (MAX_FILE_SIZE_MB + 10) * 1024 * 1024
 
-# Maximum number of accepted multipart fields (statistics + reference = 2; a few
-# extra for leniency with browsers that add metadata fields).
+# Maximum number of accepted multipart fields (statistics = 1; a few extra
+# for leniency with browsers that add metadata fields).
 _MAX_FIELDS = 10
 
-# ── Server-side map — loaded once at startup ───────────────────────────────────
-# The map file is confidential and must not be user-supplied.
+# ── Server-side files — loaded once at startup ────────────────────────────────
+# Both files are confidential and must not be user-supplied.
 _MAP_DATA: dict | None = None
+_REFERENCE_DATA: dict | None = None
 
 
 def _load_server_map() -> dict:
@@ -85,6 +87,23 @@ def _load_server_map() -> dict:
     )
     log.info("Loading server-side map from %s (include_underscore=%s)", map_path, include_underscore)
     return load_map(map_path, include_underscore_columns=include_underscore)
+
+
+def _load_server_reference() -> dict:
+    ref_path = os.environ.get("REFERENCE_FILE", "reference_amount.xlsx")
+    log.info("Loading server-side reference from %s", ref_path)
+    try:
+        data = load_reference_data(ref_path)
+        log.info(
+            "Reference loaded: %d section(s), %d combination(s)",
+            len(data.get("amounts", {})),
+            len(data.get("combinations", {})),
+        )
+        return data
+    except Exception as exc:
+        log.warning("Could not load reference file %s: %s — Benötigt column will be omitted", ref_path, exc)
+        return {}
+
 
 # Wall-clock budget for the entire request (read + parse + process + write).
 _PROCESSING_TIMEOUT_S = 60.0
@@ -157,7 +176,7 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
                 await _send_json_error(
                     res, 413,
                     f"Upload too large ({declared_length // (1024 * 1024)} MB). "
-                    f"Maximum combined upload size is {_MAX_BODY_BYTES // (1024 * 1024)} MB.",
+                    f"Maximum upload size is {_MAX_BODY_BYTES // (1024 * 1024)} MB.",
                 )
                 return
         except ValueError:
@@ -170,7 +189,7 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
         await _send_json_error(
             res, 413,
             f"Upload too large ({len(body) // (1024 * 1024)} MB). "
-            f"Maximum combined upload size is {_MAX_BODY_BYTES // (1024 * 1024)} MB.",
+            f"Maximum upload size is {_MAX_BODY_BYTES // (1024 * 1024)} MB.",
         )
         return
 
@@ -214,23 +233,10 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
         )
         return
 
-    # ── Optional reference data (never fatal — silently omitted if absent) ─────
-    ref_data: dict = {}
-    ref_bytes = fields.get("reference")
-    if ref_bytes:
-        try:
-            ref_data = load_reference_data(io.BytesIO(ref_bytes))
-            log.info(
-                "Reference amounts loaded: %d section(s), %d combination(s)",
-                len(ref_data.get("amounts", {})),
-                len(ref_data.get("combinations", {})),
-            )
-        except Exception as exc:
-            log.warning("Reference data field present but could not be loaded: %s", exc)
-
     # ── Core processing (no disk I/O) ─────────────────────────────────────────
     stats_data = load_statistics(io.BytesIO(stats_bytes))
-    map_data = _MAP_DATA  # server-side map loaded at startup
+    map_data = _MAP_DATA        # server-side map loaded at startup
+    ref_data = _REFERENCE_DATA  # server-side reference loaded at startup
     result = process(stats_data, map_data)
     filename, xlsx_bytes = build_xlsx_bytes(result, reference_data=ref_data or None)
 
@@ -253,7 +259,7 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
 
 async def handle_convert(req: HttpRequest, res: HttpResponse) -> None:
     """
-    POST /convert — receive two xlsx uploads, run the converter, stream result back.
+    POST /convert — receive a statistics xlsx upload, run the converter, stream result back.
     All error paths return JSON; the success path streams an xlsx.
     """
     try:
@@ -281,10 +287,12 @@ async def handle_convert(req: HttpRequest, res: HttpResponse) -> None:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
-    global _MAP_DATA
+    global _MAP_DATA, _REFERENCE_DATA
     _MAP_DATA = _load_server_map()
     log.info("Map loaded: %d section(s), %d leistung(en)",
              len(_MAP_DATA["sections"]), len(_MAP_DATA["leistungen"]))
+
+    _REFERENCE_DATA = _load_server_reference()
 
     engine_url = os.environ.get("III_ENGINE_URL", "ws://localhost:49134")
     worker_name = os.environ.get("WORKER_NAME", "befundungszahl-converter")
