@@ -251,10 +251,10 @@ def _build_workbook(
 
         if kind == "combo":
             for col_offset, year in enumerate(years, 2):
-                vals = ";".join(str(data[c].get(year, 0)) for c in components)
-                _count_cell(ws.cell(row=row_offset, column=col_offset), vals, bold=is_bold)
-            totals = ";".join(str(data[c].get("Total", 0)) for c in components)
-            _accent_cell(ws.cell(row=row_offset, column=gesamt_col), totals)
+                val = sum(data[c].get(year, 0) for c in components)
+                _count_cell(ws.cell(row=row_offset, column=col_offset), val, bold=is_bold)
+            total = sum(data[c].get("Total", 0) for c in components)
+            _accent_cell(ws.cell(row=row_offset, column=gesamt_col), total)
         else:
             for col_offset, year in enumerate(years, 2):
                 _count_cell(ws.cell(row=row_offset, column=col_offset), year_data.get(year, 0), bold=is_bold)
