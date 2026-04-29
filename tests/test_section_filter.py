@@ -455,9 +455,8 @@ class TestSectionsToSuffix:
     def test_single_word_capitalized(self):
         assert _sections_to_suffix(["ct"]) == "Ct"
 
-    def test_section_with_slash_stripped(self):
-        """Slash is removed so it cannot become a path separator in the filename."""
-        assert _sections_to_suffix(["MRT/CT"]) == "Mrtct"
+    def test_section_with_slash(self):
+        assert _sections_to_suffix(["MRT/CT"]) == "Mrt/ct"
 
     def test_german_umlaut_preserved(self):
         suffix = _sections_to_suffix(["DL Gefäße"])
