@@ -147,13 +147,13 @@ python -m cli.main <statistics.xlsx> <map.xlsx> [options]
 
 ```bash
 # Basic — auto-detects reference_amount.xlsx in the current directory
-python -m cli.main 2024_Statistik_KUNZ_A.xlsx mapped_leistungen.xlsx
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx
 
 # Save to a specific folder
-python -m cli.main 2024_Statistik_KUNZ_A.xlsx mapped_leistungen.xlsx --output ./reports
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --output ./reports
 
 # Specify a custom reference file
-python -m cli.main 2024_Statistik_KUNZ_A.xlsx mapped_leistungen.xlsx --reference targets_2024.xlsx
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --reference targets_2024.xlsx
 ```
 
 ---
@@ -252,12 +252,12 @@ Error responses have the shape:
 ```bash
 # Minimal — statistics only
 curl -X POST http://localhost:<engine-port>/convert \
-  -F "statistics=@2024_Statistik_KUNZ_A.xlsx" \
+  -F "statistics=@2024_Statistik_DR_EXAMPLE.xlsx" \
   --output Auswertung.xlsx
 
 # With reference amounts (Benötigt column + colour coding)
 curl -X POST http://localhost:<engine-port>/convert \
-  -F "statistics=@2024_Statistik_KUNZ_A.xlsx" \
+  -F "statistics=@2024_Statistik_DR_EXAMPLE.xlsx" \
   -F "reference=@reference_amount.xlsx" \
   --output Auswertung.xlsx
 ```
@@ -268,7 +268,7 @@ curl -X POST http://localhost:<engine-port>/convert \
 import requests
 
 with (
-    open("2024_Statistik_KUNZ_A.xlsx", "rb") as stats,
+    open("2024_Statistik_DR_EXAMPLE.xlsx", "rb") as stats,
     open("reference_amount.xlsx", "rb") as ref,
 ):
     response = requests.post(
