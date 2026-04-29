@@ -96,8 +96,11 @@ def _accent_cell(cell, value, bold: bool = True) -> None:
 
 def _sections_to_suffix(sections: list) -> str:
     """['MRT Mamma', 'MRT Prostata'] → 'MrtMamma_MrtProstata'"""
+    # Strip filesystem-invalid characters so a section name like 'MRT/CT' cannot
+    # introduce a path separator into the filename.
+    _safe = re.compile(r"[^\w]")
     return "_".join(
-        "".join(word.capitalize() for word in s.split())
+        "".join(_safe.sub("", word).capitalize() for word in s.split())
         for s in sections
     )
 
