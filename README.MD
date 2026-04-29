@@ -119,11 +119,12 @@ python main.py <statistics.xlsx> <map.xlsx> [options]
 | `--output DIR` | `.` (current directory) | Directory where the output file is saved |
 | `--include-underscore` | off | Include underscore-prefixed section columns from the map (`_CLIP`, `_TRENNER`, etc.) |
 | `--reference FILE` | `reference_amount.xlsx` (auto-detected in CWD) | Path to the reference file with required amounts per section |
+| `--sections SECTION [...]` | all sections | One or more Leistungsbereich names to include (case-insensitive). Only those sections appear in the output, errors and unmatched rows are suppressed, and the names are appended to the filename. |
 
 ### Examples
 
 ```bash
-# Basic usage — auto-detects reference_amount.xlsx in the current directory
+# Basic usage — all sections, auto-detects reference_amount.xlsx in the current directory
 python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx
 
 # Save output to a specific folder
@@ -134,6 +135,15 @@ python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --reference
 
 # Include internal map columns
 python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --include-underscore
+
+# Only include two sections — clean output, section names appended to filename
+python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx \
+  --sections "MRT Mamma" "MRT Prostata"
+
+# Filtered output with reference amounts
+python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx \
+  --sections "MRT Mamma" "CT Abdomen" \
+  --reference targets_2024.xlsx
 ```
 
 ### Output filename
@@ -144,9 +154,47 @@ The output file is named automatically from the statistics file metadata:
 {Mitarbeiter}{Befunddatum}Auswertung.xlsx
 ```
 
-Example: `DR_EXAMPLE01042019-31122022Auswertung.xlsx`
+When `--sections` is used, the selected section names are appended in CamelCase:
+
+```
+{Mitarbeiter}{Befunddatum}Auswertung_{Section1}{Section2}.xlsx
+```
+
+Example: `DR_EXAMPLE01042019-31122022Auswertung_MrtMamma_MrtProstata.xlsx`
 
 If the metadata cannot be read, a timestamped generic name is used and a note is added to the output file.
+
+---
+
+## Filtering by Leistungsbereich
+
+By default the output includes every section defined in the map. Use `--sections` to restrict the output to a specific subset.
+
+### Behaviour when a filter is active
+
+- Only the requested sections appear as rows in the output.
+- Unmatched procedures (those not found in the map) are **excluded** — the output is clean.
+- Errors, warnings, and footer notices are **suppressed**.
+- The selected section names are appended to the output filename in CamelCase.
+- The `Benötigt` column and colour coding still work normally if a reference file is provided.
+
+### Section name matching
+
+- Matching is **case-insensitive**: `"mrt mamma"` resolves to `"MRT Mamma"` as it appears in the map.
+- Duplicate names in the request are silently deduplicated.
+- An empty `--sections` list (i.e. the flag is omitted) means all sections are evaluated.
+
+### Validation and errors
+
+Every supplied name is validated before processing begins. If any name is invalid the process exits with code 1 and no output file is created.
+
+| Problem | Error |
+|---|---|
+| Name not found in map | `Unknown Leistungsbereich: 'X'. The name was not found in the map.` |
+| Empty or whitespace-only string | `Invalid filter entry — section name must not be empty or whitespace-only.` |
+| Name longer than 200 characters | `Filter entry too long (201 characters; limit is 200): ...` |
+| More than 200 names | `Too many sections requested (201); at most 200 can be specified at once.` |
+| Formula injection attempt (`=`, `+`, `-`, `@`, `\|`, …) | `Invalid filter entry — looks like a formula injection attempt: '=...'` |
 
 ---
 
@@ -226,6 +274,7 @@ The tool is designed to be robust by default:
 | Reference file fails security check | Logged as warning; Benötigt column omitted |
 | Individual reference row unparseable | That row skipped; rest of reference data used |
 | Section has no reference entry | Gesamt cell uncoloured; Benötigt cell left blank |
+| Unknown section name in `--sections` | Fatal error — exit code 1; no output file created |
 
 ---
 
@@ -239,3 +288,11 @@ All input files — including the optional reference file — are treated as pot
 - File size is capped at 50 MB
 - Every string cell value is checked for formula injection characters (`=`, `+`, `-`, `@`, `|`, …)
 - Reference amounts are bounds-checked (must be positive integers ≤ 1 000 000)
+- Zip path-traversal entries and zip bombs (> 50:1 ratio or > 200 MB uncompressed) are rejected
+
+**Section filter validation** — when `--sections` is used:
+
+- Every supplied name is checked for formula injection prefixes before the whitelist lookup
+- Only names that exactly match a section in the map are accepted (case-insensitive)
+- Partial matches and substrings are rejected
+- Item count (max 200) and item length (max 200 chars) are capped
