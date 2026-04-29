@@ -300,7 +300,7 @@ class TestBuildXlsxBytes:
 # ── TestCombinationRows ────────────────────────────────────────────────────────
 
 class TestCombinationRows:
-    """Combination rows: semicolon-separated values, dropped when component missing."""
+    """Combination rows: summed values, dropped when component missing."""
 
     def _ref_data(self, amounts, combinations, order=None):
         return {
@@ -326,7 +326,7 @@ class TestCombinationRows:
         first_col = [ws.cell(r, 1).value for r in range(1, 10)]
         assert "Combo" in first_col
 
-    def test_combination_year_cell_is_semicolon_separated(self, tmp_path):
+    def test_combination_year_cell_is_sum(self, tmp_path):
         result = make_result(
             ["A", "B"],
             {"A": {2024: 10}, "B": {2024: 20}},
@@ -341,16 +341,14 @@ class TestCombinationRows:
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
         combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
-        year_cell = ws.cell(combo_row, 2).value
-        assert ";" in str(year_cell)
-        parts = str(year_cell).split(";")
-        assert set(parts) == {"10", "20"}
+        assert ws.cell(combo_row, 2).value == 30  # 10 + 20
 
-    def test_combination_gesamt_is_semicolon_separated(self, tmp_path):
+    def test_combination_gesamt_is_sum(self, tmp_path):
         result = make_result(
             ["A", "B"],
             {"A": {2024: 10}, "B": {2024: 20}},
             [2024],
+            total_counted=30,
         )
         ref = self._ref_data(
             {"Combo": 100},
@@ -363,8 +361,87 @@ class TestCombinationRows:
         header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         gesamt_col = header.index("Gesamt") + 1
         combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
-        gesamt_val = ws.cell(combo_row, gesamt_col).value
-        assert ";" in str(gesamt_val)
+        assert ws.cell(combo_row, gesamt_col).value == 30  # 10 + 20
+
+    def test_combination_sum_across_multiple_years(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2022: 100, 2023: 200}, "B": {2022: 50, 2023: 75}},
+            [2022, 2023],
+            total_counted=425,
+        )
+        ref = self._ref_data(
+            {"Combo": 500},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        col_2022 = header.index("2022") + 1
+        col_2023 = header.index("2023") + 1
+        gesamt_col = header.index("Gesamt") + 1
+        combo_row = next(r for r in range(2, 15) if ws.cell(r, 1).value == "Combo")
+        assert ws.cell(combo_row, col_2022).value == 150   # 100 + 50
+        assert ws.cell(combo_row, col_2023).value == 275   # 200 + 75
+        assert ws.cell(combo_row, gesamt_col).value == 425  # 150 + 275
+
+    def test_combination_three_components_sum(self, tmp_path):
+        result = make_result(
+            ["X", "Y", "Z"],
+            {"X": {2024: 1000}, "Y": {2024: 500}, "Z": {2024: 250}},
+            [2024],
+            total_counted=1750,
+        )
+        ref = self._ref_data(
+            {"Triple": 2000},
+            {"Triple": ["X", "Y", "Z"]},
+            order=["Triple", "X", "Y", "Z"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        gesamt_col = header.index("Gesamt") + 1
+        combo_row = next(r for r in range(2, 15) if ws.cell(r, 1).value == "Triple")
+        assert ws.cell(combo_row, 2).value == 1750   # 1000 + 500 + 250
+        assert ws.cell(combo_row, gesamt_col).value == 1750
+
+    def test_combination_component_with_zero_counts(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 0}, "B": {2024: 42}},
+            [2024],
+            total_counted=42,
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
+        assert ws.cell(combo_row, 2).value == 42  # 0 + 42
+
+    def test_combination_year_cell_is_not_string(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 10}, "B": {2024: 20}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
+        assert isinstance(ws.cell(combo_row, 2).value, (int, float))
 
     def test_combination_dropped_when_component_missing(self, tmp_path):
         result = make_result(
