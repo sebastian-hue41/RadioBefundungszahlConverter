@@ -25,9 +25,6 @@ ALLOWED_EXTENSIONS = {".xlsx"}
 _MAX_REFERENCE_ROWS = 10_000
 _MAX_REFERENCE_AMOUNT = 1_000_000
 
-_MAX_FILTER_ITEMS = 200
-_MAX_FILTER_ITEM_LENGTH = 200
-
 # Cells/values starting with these chars are formula injection attempts.
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "|", "\t", "\r")
 
@@ -51,10 +48,6 @@ class MapValidationError(ValueError):
     def __init__(self, message: str, recoverable: bool = False):
         super().__init__(message)
         self.recoverable = recoverable
-
-
-class SectionFilterError(ValueError):
-    """Raised when a user-supplied Leistungsbereich filter is invalid."""
 
 
 # ── Shared security validation ─────────────────────────────────────────────────
@@ -687,83 +680,3 @@ def load_reference_amounts(path: str) -> dict[str, int]:
             pass
 
     return amounts
-
-
-# ── Section filter validator ───────────────────────────────────────────────────
-
-def validate_section_filter(
-    requested: list,
-    known_sections: list,
-) -> list:
-    """
-    Validate a user-supplied list of Leistungsbereich names against the map.
-
-    Returns the canonical section names (as they appear in the map) in the
-    order requested, deduplicated.  An empty list means "no filter" (all
-    sections are evaluated).
-
-    Raises SectionFilterError with a descriptive message on any problem:
-      - non-string item
-      - empty or whitespace-only string
-      - item exceeds length limit
-      - formula injection attempt
-      - name not found in the map
-      - too many items in the list
-
-    Security notes:
-      - Each item is checked for formula injection prefixes before the lookup.
-      - The result is a strict whitelist lookup — only known section names pass.
-      - Error messages do NOT enumerate available sections to prevent probing.
-    """
-    if not requested:
-        return []
-
-    if len(requested) > _MAX_FILTER_ITEMS:
-        raise SectionFilterError(
-            f"Too many sections requested ({len(requested)}); "
-            f"at most {_MAX_FILTER_ITEMS} can be specified at once."
-        )
-
-    # Build a case-insensitive lookup: normalised_lower → canonical name from map
-    known_lower: dict = {s.lower(): s for s in known_sections}
-
-    result: list = []
-    for item in requested:
-        if not isinstance(item, str):
-            raise SectionFilterError(
-                f"Invalid filter entry — expected a string, "
-                f"got {type(item).__name__!r}: {item!r}"
-            )
-
-        stripped = item.strip()
-
-        if not stripped:
-            raise SectionFilterError(
-                "Invalid filter entry — section name must not be empty or "
-                "whitespace-only."
-            )
-
-        if len(stripped) > _MAX_FILTER_ITEM_LENGTH:
-            raise SectionFilterError(
-                f"Filter entry too long ({len(stripped)} characters; "
-                f"limit is {_MAX_FILTER_ITEM_LENGTH}): {stripped[:60]!r}..."
-            )
-
-        if stripped.startswith(_FORMULA_PREFIXES):
-            raise SectionFilterError(
-                f"Invalid filter entry — looks like a formula injection attempt: "
-                f"{stripped[:60]!r}"
-            )
-
-        canonical = known_lower.get(stripped.lower())
-        if canonical is None:
-            raise SectionFilterError(
-                f"Unknown Leistungsbereich: {stripped!r}. "
-                "The name was not found in the map. "
-                "Check the spelling — matching is case-insensitive."
-            )
-
-        if canonical not in result:  # deduplicate while preserving order
-            result.append(canonical)
-
-    return result
