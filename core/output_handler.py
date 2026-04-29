@@ -94,27 +94,13 @@ def _accent_cell(cell, value, bold: bool = True) -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _sections_to_suffix(sections: list) -> str:
-    """['MRT Mamma', 'MRT Prostata'] → 'MrtMamma_MrtProstata'"""
-    return "_".join(
-        "".join(word.capitalize() for word in s.split())
-        for s in sections
-    )
-
-
-def _make_filename(
-    mitarbeiter: "str | None",
-    befunddatum: "str | None",
-    section_suffix: "str | None" = None,
-) -> str:
+def _make_filename(mitarbeiter: str | None, befunddatum: str | None) -> str:
     if mitarbeiter and befunddatum:
         clean = lambda s: re.sub(r"[^\w\-]", "", s.replace(" ", ""))
         name = f"{clean(mitarbeiter)}{clean(befunddatum)}Auswertung"
     else:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"Auswertung_{ts}"
-    if section_suffix:
-        name = f"{name}_{section_suffix}"
     return f"{name}.xlsx"
 
 
@@ -180,13 +166,7 @@ def _build_workbook(
     Build an openpyxl Workbook from a processing result dict.
     Returns (filename, workbook) — no I/O performed.
     """
-    filter_secs: list = result.get("filter_sections", [])
-    section_suffix = _sections_to_suffix(filter_secs) if filter_secs else None
-    filename = _make_filename(
-        result.get("mitarbeiter"),
-        result.get("befunddatum"),
-        section_suffix=section_suffix,
-    )
+    filename = _make_filename(result.get("mitarbeiter"), result.get("befunddatum"))
 
     years:             list[int]       = result["years"]
     data:              dict[str, dict] = result["data"]

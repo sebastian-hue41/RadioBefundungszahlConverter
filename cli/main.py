@@ -18,12 +18,10 @@ import sys
 from core.input_handler import (
     FileValidationError,
     MapValidationError,
-    SectionFilterError,
     StatsValidationError,
     load_map,
     load_reference_amounts,
     load_statistics,
-    validate_section_filter,
 )
 from core.logic import process
 from core.output_handler import save_output
@@ -64,16 +62,6 @@ examples:
         help=(
             "Path to the reference xlsx with required amounts per section "
             "(default: auto-detect 'reference_amount.xlsx' in the current directory)"
-        ),
-    )
-    parser.add_argument(
-        "--sections",
-        nargs="+",
-        metavar="SECTION",
-        help=(
-            "One or more Leistungsbereich names to include (case-insensitive). "
-            "If omitted, all sections are evaluated. "
-            "Example: --sections \"MRT Mamma\" \"MRT Prostata\""
         ),
     )
     return parser
@@ -144,21 +132,10 @@ def main() -> int:
     print(f"  -> {len(map_data['leistungen']):,} leistung entries loaded")
     print(f"  -> {len(map_data['sections'])} section columns")
 
-    # ── Validate section filter (optional) ────────────────────────────────────
-    filter_sections = None
-    if args.sections:
-        print(f"\n[filter] Validating section filter ({len(args.sections)} item(s))...")
-        try:
-            filter_sections = validate_section_filter(args.sections, map_data["sections"])
-        except SectionFilterError as exc:
-            print(f"  ERROR (filter): {exc}", file=sys.stderr)
-            return 1
-        print(f"  -> Filter active: {filter_sections}")
-
     # ── Process ────────────────────────────────────────────────────────────────
     print("\n[3/3] Processing...")
     try:
-        result = process(stats_data, map_data, filter_sections=filter_sections or None)
+        result = process(stats_data, map_data)
     except Exception as exc:
         print(f"  UNEXPECTED ERROR during processing: {exc}", file=sys.stderr)
         return 1
