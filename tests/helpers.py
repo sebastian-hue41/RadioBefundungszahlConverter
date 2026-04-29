@@ -88,20 +88,32 @@ def make_map_wb(
 def make_reference_wb(
     amounts: dict[str, int],
     include_header: bool = True,
+    combinations: "dict | None" = None,
+    order: "list | None" = None,
 ) -> openpyxl.Workbook:
-    """Create a reference amounts workbook."""
+    """Create a reference amounts workbook with optional combination definitions."""
     wb = openpyxl.Workbook()
     ws = wb.active
 
     row = 1
+    _combos = combinations or {}
+    _order  = order if order is not None else list(amounts.keys())
+    for name in _combos:
+        if name not in _order:
+            _order = list(_order) + [name]
+
     if include_header:
         ws.cell(row=row, column=1).value = "Leistungsbereich"
         ws.cell(row=row, column=2).value = "Benötigt"
+        if _combos:
+            ws.cell(row=row, column=3).value = "Includiert"
         row += 1
 
-    for name, amount in amounts.items():
+    for name in _order:
         ws.cell(row=row, column=1).value = name
-        ws.cell(row=row, column=2).value = amount
+        ws.cell(row=row, column=2).value = amounts.get(name)
+        if name in _combos:
+            ws.cell(row=row, column=3).value = ";".join(_combos[name])
         row += 1
 
     return wb

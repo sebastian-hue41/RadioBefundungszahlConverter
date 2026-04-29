@@ -295,3 +295,169 @@ class TestBuildXlsxBytes:
         result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
         build_xlsx_bytes(result)
         assert written == [], f"build_xlsx_bytes wrote to disk: {written}"
+
+
+# ── TestCombinationRows ────────────────────────────────────────────────────────
+
+class TestCombinationRows:
+    """Combination rows: semicolon-separated values, dropped when component missing."""
+
+    def _ref_data(self, amounts, combinations, order=None):
+        return {
+            "amounts": amounts,
+            "combinations": combinations,
+            "order": order or list(amounts.keys()),
+        }
+
+    def test_combination_row_inserted_in_output(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 10}, "B": {2024: 20}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        first_col = [ws.cell(r, 1).value for r in range(1, 10)]
+        assert "Combo" in first_col
+
+    def test_combination_year_cell_is_semicolon_separated(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 10}, "B": {2024: 20}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
+        year_cell = ws.cell(combo_row, 2).value
+        assert ";" in str(year_cell)
+        parts = str(year_cell).split(";")
+        assert set(parts) == {"10", "20"}
+
+    def test_combination_gesamt_is_semicolon_separated(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 10}, "B": {2024: 20}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        gesamt_col = header.index("Gesamt") + 1
+        combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
+        gesamt_val = ws.cell(combo_row, gesamt_col).value
+        assert ";" in str(gesamt_val)
+
+    def test_combination_dropped_when_component_missing(self, tmp_path):
+        result = make_result(
+            ["A"],          # only A in data, B is missing
+            {"A": {2024: 10}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        first_col = [ws.cell(r, 1).value for r in range(1, 10)]
+        assert "Combo" not in first_col
+        assert "A" in first_col
+
+    def test_regular_sections_still_appear_with_combinations(self, tmp_path):
+        result = make_result(
+            ["A", "B", "C"],
+            {"A": {2024: 5}, "B": {2024: 15}, "C": {2024: 25}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B", "C"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        first_col = [ws.cell(r, 1).value for r in range(1, 15)]
+        assert "Combo" in first_col
+        assert "A" in first_col
+        assert "B" in first_col
+        assert "C" in first_col
+
+    def test_sections_not_in_ref_order_appended_at_end(self, tmp_path):
+        result = make_result(
+            ["A", "B", "Extra"],
+            {"A": {2024: 5}, "B": {2024: 10}, "Extra": {2024: 99}},
+            [2024],
+        )
+        ref = self._ref_data({}, {}, order=["A", "B"])
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        first_col = [ws.cell(r, 1).value for r in range(2, 10) if ws.cell(r, 1).value]
+        assert first_col.index("A") < first_col.index("Extra")
+        assert first_col.index("B") < first_col.index("Extra")
+
+
+# ── TestBoldOnReferenceAmount ──────────────────────────────────────────────────
+
+class TestBoldOnReferenceAmount:
+    """Rows with a reference amount render all text cells bold."""
+
+    def _ref_data(self, amounts):
+        return {"amounts": amounts, "combinations": {}, "order": list(amounts.keys())}
+
+    def test_section_name_bold_when_has_reference(self, tmp_path):
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
+        ref = self._ref_data({"MRT": 3000})
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        assert ws.cell(2, 1).font.bold is True
+
+    def test_section_name_not_bold_without_reference(self, tmp_path):
+        result = make_result(["CT"], {"CT": {2024: 5}}, [2024])
+        ref = self._ref_data({"MRT": 3000})  # MRT has ref, CT does not
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        # Find CT row
+        ct_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "CT")
+        assert not ws.cell(ct_row, 1).font.bold
+
+    def test_year_cell_bold_when_has_reference(self, tmp_path):
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
+        ref = self._ref_data({"MRT": 3000})
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        assert ws.cell(2, 2).font.bold is True  # year column cell
+
+    def test_year_cell_not_bold_without_reference(self, tmp_path):
+        result = make_result(["CT"], {"CT": {2024: 5}}, [2024])
+        ref = self._ref_data({"MRT": 3000})
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        ct_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "CT")
+        assert not ws.cell(ct_row, 2).font.bold

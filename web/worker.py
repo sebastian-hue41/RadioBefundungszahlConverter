@@ -53,7 +53,7 @@ from core.input_handler import (
     MAX_FILE_SIZE_MB,
     StatsValidationError,
     load_map,
-    load_reference_amounts,
+    load_reference_data,
     load_statistics,
 )
 from core.logic import process
@@ -214,21 +214,25 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
         )
         return
 
-    # ── Optional reference amounts (never fatal — silently omitted if absent) ──
-    reference_amounts: dict[str, int] = {}
+    # ── Optional reference data (never fatal — silently omitted if absent) ─────
+    ref_data: dict = {}
     ref_bytes = fields.get("reference")
     if ref_bytes:
         try:
-            reference_amounts = load_reference_amounts(io.BytesIO(ref_bytes))
-            log.info("Reference amounts loaded: %d section(s)", len(reference_amounts))
+            ref_data = load_reference_data(io.BytesIO(ref_bytes))
+            log.info(
+                "Reference amounts loaded: %d section(s), %d combination(s)",
+                len(ref_data.get("amounts", {})),
+                len(ref_data.get("combinations", {})),
+            )
         except Exception as exc:
-            log.warning("Reference amounts field present but could not be loaded: %s", exc)
+            log.warning("Reference data field present but could not be loaded: %s", exc)
 
     # ── Core processing (no disk I/O) ─────────────────────────────────────────
     stats_data = load_statistics(io.BytesIO(stats_bytes))
     map_data = _MAP_DATA  # server-side map loaded at startup
     result = process(stats_data, map_data)
-    filename, xlsx_bytes = build_xlsx_bytes(result, reference_amounts=reference_amounts or None)
+    filename, xlsx_bytes = build_xlsx_bytes(result, reference_data=ref_data or None)
 
     # ── Stream the response ───────────────────────────────────────────────────
     await res.status(200)

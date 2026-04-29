@@ -15,6 +15,7 @@ from core.input_handler import (
     StatsValidationError,
     load_map,
     load_reference_amounts,
+    load_reference_data,
     load_statistics,
     validate_xlsx_bytes,
     validate_xlsx_file,
@@ -579,3 +580,72 @@ class TestLoadReferenceAmounts:
         path_result = load_reference_amounts(save_wb(wb, tmp_path / "r.xlsx"))
         bytes_result = load_reference_amounts(wb_to_bytes(wb))
         assert path_result == bytes_result
+
+
+class TestLoadReferenceData:
+    """Tests for load_reference_data — full structure with combinations and order."""
+
+    def test_amounts_matches_load_reference_amounts(self, tmp_path):
+        wb = make_reference_wb({"MRT": 3000, "CT": 4000})
+        path = save_wb(wb, tmp_path / "ref.xlsx")
+        data = load_reference_data(path)
+        assert data["amounts"] == load_reference_amounts(path)
+
+    def test_order_follows_file_row_order(self, tmp_path):
+        order = ["CT", "US", "MRT"]
+        wb = make_reference_wb({"CT": 4000, "US": 3000, "MRT": 3000}, order=order)
+        path = save_wb(wb, tmp_path / "ref.xlsx")
+        data = load_reference_data(path)
+        assert data["order"] == order
+
+    def test_combinations_parsed_from_col_c(self, tmp_path):
+        combos = {"Combo": ["MRT Prostata", "MRT Herz"]}
+        wb = make_reference_wb({"Combo": 5000}, combinations=combos)
+        path = save_wb(wb, tmp_path / "ref.xlsx")
+        data = load_reference_data(path)
+        assert data["combinations"] == {"Combo": ["MRT Prostata", "MRT Herz"]}
+
+    def test_trailing_semicolon_in_components_stripped(self, tmp_path):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Section"
+        ws["B1"] = "Betrag"
+        ws["C1"] = "Includiert"
+        ws["A2"] = "Combo"
+        ws["B2"] = 1000
+        ws["C2"] = "A;B;C;"   # trailing semicolon
+        path = save_wb(wb, tmp_path / "ref.xlsx")
+        data = load_reference_data(path)
+        assert data["combinations"]["Combo"] == ["A", "B", "C"]
+
+    def test_no_combination_col_returns_empty_combinations(self, tmp_path):
+        wb = make_reference_wb({"MRT": 3000})
+        path = save_wb(wb, tmp_path / "ref.xlsx")
+        data = load_reference_data(path)
+        assert data["combinations"] == {}
+
+    def test_section_without_amount_still_in_order(self, tmp_path):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws["A1"] = "Section"
+        ws["B1"] = "Betrag"
+        ws["A2"] = "NoAmount"
+        ws["B2"] = None
+        ws["A3"] = "HasAmount"
+        ws["B3"] = 1000
+        path = save_wb(wb, tmp_path / "ref.xlsx")
+        data = load_reference_data(path)
+        assert "NoAmount" in data["order"]
+        assert "HasAmount" in data["order"]
+        assert "NoAmount" not in data["amounts"]
+        assert data["amounts"]["HasAmount"] == 1000
+
+    def test_nonexistent_file_returns_empty_structure(self):
+        data = load_reference_data("/nonexistent/path.xlsx")
+        assert data == {"amounts": {}, "combinations": {}, "order": []}
+
+    def test_bytes_input_accepted(self):
+        combos = {"Combo": ["A", "B"]}
+        wb = make_reference_wb({"Combo": 500, "A": 0}, combinations=combos)
+        data = load_reference_data(wb_to_bytes(wb))
+        assert data["combinations"] == {"Combo": ["A", "B"]}

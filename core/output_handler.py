@@ -69,16 +69,16 @@ def _header_cell(cell, value: str, align: str = "center") -> None:
     cell.border = _HEADER_BORDER
 
 
-def _section_cell(cell, value: str) -> None:
+def _section_cell(cell, value: str, bold: bool = False) -> None:
     cell.value = value
-    cell.font = Font(name=_FONT, size=10, color=_TEXT_BODY)
+    cell.font = Font(name=_FONT, size=10, bold=bold, color=_TEXT_BODY)
     cell.alignment = Alignment(horizontal="left", vertical="center", indent=1)
     cell.border = _ROW_BORDER
 
 
-def _count_cell(cell, value: int) -> None:
+def _count_cell(cell, value, bold: bool = False) -> None:
     cell.value = value
-    cell.font = Font(name=_FONT, size=10, color=_TEXT_BODY)
+    cell.font = Font(name=_FONT, size=10, bold=bold, color=_TEXT_BODY)
     cell.alignment = Alignment(horizontal="right", vertical="center")
     cell.border = _ROW_BORDER
 
@@ -118,10 +118,10 @@ def _add_achievement_cf(
         gf = f"{g}{first_row}"
         bf = f"{b}{first_row}"
         for formula, color in (
-            (f'AND({bf}<>"",{bf}>0,{gf}/{bf}>=1)',   _ACH_GREEN),
-            (f'AND({bf}<>"",{bf}>0,{gf}/{bf}>=0.8)', _ACH_YELLOW),
-            (f'AND({bf}<>"",{bf}>0,{gf}/{bf}>=0.5)', _ACH_ORANGE),
-            (f'AND({bf}<>"",{bf}>0,{gf}/{bf}>0)',    _ACH_RED),
+            (f'AND(ISNUMBER({gf}),{bf}<>"",{bf}>0,{gf}/{bf}>=1)',   _ACH_GREEN),
+            (f'AND(ISNUMBER({gf}),{bf}<>"",{bf}>0,{gf}/{bf}>=0.8)', _ACH_YELLOW),
+            (f'AND(ISNUMBER({gf}),{bf}<>"",{bf}>0,{gf}/{bf}>=0.5)', _ACH_ORANGE),
+            (f'AND(ISNUMBER({gf}),{bf}<>"",{bf}>0,{gf}/{bf}>0)',    _ACH_RED),
         ):
             ws.conditional_formatting.add(
                 cf_range,
@@ -161,10 +161,15 @@ def _set_column_widths(ws, n_years: int, gesamt_col: int, has_reference: bool) -
 def _build_workbook(
     result: dict,
     reference_amounts: "dict[str, int] | None" = None,
+    reference_data: "dict | None" = None,
 ) -> "tuple[str, openpyxl.Workbook]":
     """
     Build an openpyxl Workbook from a processing result dict.
     Returns (filename, workbook) — no I/O performed.
+
+    Pass `reference_data` (from load_reference_data) to enable combination rows
+    and reference-file ordering.  `reference_amounts` is kept for backward
+    compatibility when only the amounts dict is available.
     """
     filename = _make_filename(result.get("mitarbeiter"), result.get("befunddatum"))
 
@@ -181,7 +186,16 @@ def _build_workbook(
     ws.title = "Auswertung"
     ws.freeze_panes = "B2"
 
-    _ref:       dict[str, int] = reference_amounts or {}
+    # reference_data takes precedence over the legacy reference_amounts param.
+    if reference_data:
+        _ref:          dict[str, int]  = reference_data.get("amounts", {})
+        _combinations: dict[str, list] = reference_data.get("combinations", {})
+        _ref_order:    list[str]       = reference_data.get("order", [])
+    else:
+        _ref          = reference_amounts or {}
+        _combinations = {}
+        _ref_order    = []
+
     _ref_lower: dict[str, int] = {k.lower(): v for k, v in _ref.items()}
     has_reference = bool(_ref)
 
@@ -204,39 +218,74 @@ def _build_workbook(
         _header_cell(ws.cell(row=1, column=col_idx), text)
     ws.row_dimensions[1].height = 34
 
+    # ── Build output row sequence ──────────────────────────────────────────────
+    # Follow reference file order (regular + combination rows).
+    # Combination rows missing any component are silently dropped.
+    # Data sections not listed in the reference file are appended at the end.
+    output_rows: list[tuple] = []   # (name, kind, components_or_None)
+    seen: set[str] = set()
+
+    for name in _ref_order:
+        if name in _combinations:
+            components = _combinations[name]
+            if any(c not in data for c in components):
+                continue  # drop — at least one component is missing
+            output_rows.append((name, "combo", components))
+            seen.add(name)
+        elif name in data:
+            output_rows.append((name, "regular", None))
+            seen.add(name)
+
+    for name in data:
+        if name not in seen:
+            output_rows.append((name, "regular", None))
+
     # ── Data rows ─────────────────────────────────────────────────────────────
-    for row_offset, (section, year_data) in enumerate(data.items(), 2):
-        _section_cell(ws.cell(row=row_offset, column=1), section)
+    row_offset = 2
+    for name, kind, components in output_rows:
+        year_data = data.get(name, {})
+        required  = _lookup_required(name)
+        is_bold   = required is not None
 
-        for col_offset, year in enumerate(years, 2):
-            _count_cell(ws.cell(row=row_offset, column=col_offset), year_data.get(year, 0))
+        _section_cell(ws.cell(row=row_offset, column=1), name, bold=is_bold)
 
-        _accent_cell(ws.cell(row=row_offset, column=gesamt_col), year_data.get("Total", 0))
+        if kind == "combo":
+            for col_offset, year in enumerate(years, 2):
+                vals = ";".join(str(data[c].get(year, 0)) for c in components)
+                _count_cell(ws.cell(row=row_offset, column=col_offset), vals, bold=is_bold)
+            totals = ";".join(str(data[c].get("Total", 0)) for c in components)
+            _accent_cell(ws.cell(row=row_offset, column=gesamt_col), totals)
+        else:
+            for col_offset, year in enumerate(years, 2):
+                _count_cell(ws.cell(row=row_offset, column=col_offset), year_data.get(year, 0), bold=is_bold)
+            _accent_cell(ws.cell(row=row_offset, column=gesamt_col), year_data.get("Total", 0))
 
         if has_reference:
-            required = _lookup_required(section)
             try:
                 _accent_cell(
                     ws.cell(row=row_offset, column=benoetigt_col),
-                    required,          # None leaves cell blank but keeps styling
+                    required,
                     bold=required is not None,
                 )
             except Exception:
                 pass
 
         ws.row_dimensions[row_offset].height = 20
+        row_offset += 1
+
+    last_data_row = row_offset - 1
 
     # Conditional formatting on Gesamt column (live colour in Excel)
-    if has_reference and data:
+    if has_reference and last_data_row >= 2:
         _add_achievement_cf(
-            ws, gesamt_col, benoetigt_col, first_row=2, last_row=len(data) + 1
+            ws, gesamt_col, benoetigt_col, first_row=2, last_row=last_data_row
         )
 
     # ── Column widths ─────────────────────────────────────────────────────────
     _set_column_widths(ws, len(years), gesamt_col, has_reference)
 
     # ── Footer ────────────────────────────────────────────────────────────────
-    next_row = len(data) + 3   # one blank row separates data from footer
+    next_row = last_data_row + 2   # one blank row separates data from footer
 
     # Count summary
     lbl = ws.cell(row=next_row, column=1)
@@ -332,14 +381,21 @@ def _build_workbook(
 def build_xlsx_bytes(
     result: dict,
     reference_amounts: "dict[str, int] | None" = None,
+    reference_data: "dict | None" = None,
 ) -> "tuple[str, bytes]":
     """
     Build the xlsx entirely in memory and return (filename, raw_bytes).
 
     No files are written to disk — intended for the iii web worker where
     the bytes are streamed directly back to the HTTP client.
+
+    Pass `reference_data` (from load_reference_data) to enable combination rows
+    and reference-file ordering.  `reference_amounts` is kept for backward
+    compatibility when only the amounts dict is available.
     """
-    filename, wb = _build_workbook(result, reference_amounts=reference_amounts)
+    filename, wb = _build_workbook(
+        result, reference_amounts=reference_amounts, reference_data=reference_data
+    )
     buf = io.BytesIO()
     wb.save(buf)
     return filename, buf.getvalue()
@@ -349,14 +405,21 @@ def save_output(
     result: dict,
     output_dir: str = ".",
     reference_amounts: "dict[str, int] | None" = None,
+    reference_data: "dict | None" = None,
 ) -> str:
     """
     Build the xlsx and save it to `output_dir` on disk.
 
+    Pass `reference_data` (from load_reference_data) to enable combination rows
+    and reference-file ordering.  `reference_amounts` is kept for backward
+    compatibility when only the amounts dict is available.
+
     Returns the absolute path of the saved file.
     Raises IOError if the directory cannot be created or the file cannot be written.
     """
-    filename, wb = _build_workbook(result, reference_amounts=reference_amounts)
+    filename, wb = _build_workbook(
+        result, reference_amounts=reference_amounts, reference_data=reference_data
+    )
 
     try:
         out_dir = Path(output_dir).resolve()

@@ -645,45 +645,56 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
 
 # ── Reference amounts loader ───────────────────────────────────────────────────
 
-def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
+def load_reference_data(source: XlsxSource) -> "dict":
     """
-    Loads section → required-amount mapping from a reference xlsx.
+    Loads the full reference structure from a reference xlsx.
 
     Accepts the same XlsxSource union as the other loaders (path or BytesIO),
     so it works identically from the CLI (path) and the web worker (bytes).
 
     Expected format (reference_amount.xlsx):
-        Row 1 : headers, e.g. 'Leistungsbereich' | 'Benötigt'
-        Rows 2+: section name in col A, positive integer in col B (None = skip)
+        Row 1 : headers — 'Leistungsbereich' | 'Benötigt' | 'Includiert' (optional)
+        Rows 2+:
+            col A: section name
+            col B: positive integer reference amount (None or missing = no reference)
+            col C: semicolon-separated component section names (defines a combination row)
 
-    Returns {} on ANY error — never raises.
-    All problems are logged at WARNING so normal processing is never interrupted
-    even if the reference file is missing, corrupt, or malicious.
+    Returns a dict:
+        amounts      dict[str, int]        section → required count (col B > 0)
+        combinations dict[str, list[str]]  combination name → ordered component list
+        order        list[str]             all section names in file order
+
+    Returns {"amounts": {}, "combinations": {}, "order": []} on ANY error — never raises.
+    All problems are logged at WARNING so normal processing is never interrupted.
     """
-    amounts: dict[str, int] = {}
+    empty: dict = {"amounts": {}, "combinations": {}, "order": []}
 
     # ── Validate and normalise source ──────────────────────────────────────────
     try:
         src = _resolve_source(source, "reference_amount.xlsx")
     except FileValidationError as exc:
         log.warning("Reference amounts file failed security validation: %s", exc)
-        return amounts
+        return empty
     except Exception as exc:
         log.warning("Reference amounts: unexpected validation error: %s", exc)
-        return amounts
+        return empty
 
     # ── Open workbook ──────────────────────────────────────────────────────────
     try:
         wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
     except Exception as exc:
         log.warning("Reference amounts: cannot open file: %s", exc)
-        return amounts
+        return empty
+
+    amounts: dict[str, int] = {}
+    combinations: dict[str, list] = {}
+    order: list[str] = []
 
     try:
         ws = wb.active
         if ws is None:
             log.warning("Reference amounts: no active worksheet found")
-            return amounts
+            return empty
 
         header_skipped = False
         row_count = 0
@@ -713,9 +724,7 @@ def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
                     break
 
                 name_raw = row[0] if len(row) > 0 else None
-                amount_raw = row[1] if len(row) > 1 else None
-
-                if name_raw is None or amount_raw is None:
+                if name_raw is None:
                     continue
 
                 name_str = str(name_raw).strip()
@@ -729,30 +738,41 @@ def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
                     log.warning("Reference amounts: skipping row %d — %s", row_num, exc)
                     continue
 
-                # Parse amount as a positive integer within a sane range.
-                try:
-                    amount = int(float(str(amount_raw).strip()))
-                except (ValueError, TypeError):
-                    log.warning(
-                        "Reference amounts: cannot parse amount %r at row %d, skipping",
-                        amount_raw, row_num,
-                    )
-                    continue
+                order.append(name_str)
 
-                if amount <= 0:
-                    log.warning(
-                        "Reference amounts: non-positive value %d at row %d, skipping",
-                        amount, row_num,
-                    )
-                    continue
-                if amount > _MAX_REFERENCE_AMOUNT:
-                    log.warning(
-                        "Reference amounts: implausibly large value %d at row %d, skipping",
-                        amount, row_num,
-                    )
-                    continue
+                # ── Col B: optional reference amount ───────────────────────────
+                amount_raw = row[1] if len(row) > 1 else None
+                if amount_raw is not None:
+                    try:
+                        amount = int(float(str(amount_raw).strip()))
+                        if amount <= 0:
+                            log.warning(
+                                "Reference amounts: non-positive value %d at row %d, skipping",
+                                amount, row_num,
+                            )
+                        elif amount > _MAX_REFERENCE_AMOUNT:
+                            log.warning(
+                                "Reference amounts: implausibly large value %d at row %d, skipping",
+                                amount, row_num,
+                            )
+                        else:
+                            amounts[name_str] = amount
+                    except (ValueError, TypeError):
+                        log.warning(
+                            "Reference amounts: cannot parse amount %r at row %d, skipping",
+                            amount_raw, row_num,
+                        )
 
-                amounts[name_str] = amount
+                # ── Col C: optional combination definition ─────────────────────
+                combo_raw = row[2] if len(row) > 2 else None
+                if combo_raw is not None and str(combo_raw).strip():
+                    components = [
+                        c.strip()
+                        for c in str(combo_raw).split(";")
+                        if c.strip()
+                    ]
+                    if components:
+                        combinations[name_str] = components
 
             except Exception as exc:
                 log.warning("Reference amounts: error processing row %d — %s", row_num, exc)
@@ -760,7 +780,7 @@ def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
 
     except Exception as exc:
         log.warning("Reference amounts: unexpected error reading file — %s", exc)
-        return {}
+        return empty
 
     finally:
         try:
@@ -768,4 +788,17 @@ def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
         except Exception:
             pass
 
-    return amounts
+    return {"amounts": amounts, "combinations": combinations, "order": order}
+
+
+def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
+    """
+    Loads section → required-amount mapping from a reference xlsx.
+
+    Backward-compatible wrapper around load_reference_data — returns only the
+    amounts dict.  Use load_reference_data() when combination and ordering
+    information is also needed.
+
+    Returns {} on ANY error — never raises.
+    """
+    return load_reference_data(source)["amounts"]
