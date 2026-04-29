@@ -2,7 +2,7 @@
 
 Generates a **Facharzt-Auswertung** xlsx report for Radiology by cross-referencing a per-physician examination statistics file against a procedure-to-section mapping file, with optional colour-coded target comparison.
 
-Available as a **CLI tool** (master branch) and as an **iii web worker** (this branch).
+Available as a **CLI tool** (main branch) and as an **iii web worker** (this branch).
 
 ---
 
@@ -18,16 +18,17 @@ Available as a **CLI tool** (master branch) and as an **iii web worker** (this b
    - [Running the worker](#running-the-worker)
    - [HTTP API](#http-api)
    - [Calling the API](#calling-the-api)
-6. [Input file requirements](#input-file-requirements)
-7. [Reference amounts and colour coding](#reference-amounts-and-colour-coding)
-8. [Error handling](#error-handling)
-9. [Security](#security)
+6. [Filtering by Leistungsbereich](#filtering-by-leistungsbereich)
+7. [Input file requirements](#input-file-requirements)
+8. [Reference amounts and colour coding](#reference-amounts-and-colour-coding)
+9. [Error handling](#error-handling)
+10. [Security](#security)
 
 ---
 
 ## What it does
 
-Given two required input files (and one optional reference file):
+Given two required input files (and optional extras):
 
 | File | Required | Content |
 |---|---|---|
@@ -36,7 +37,7 @@ Given two required input files (and one optional reference file):
 | `reference_amount.xlsx` | Uploaded by user (optional) | Required examination counts per section — adds a colour-coded **Benötigt** column to the output |
 
 The tool produces a single output xlsx with:
-- **Rows** — radiology sections from the map (e.g. MRT, US gesamt, Mamma gesamt)
+- **Rows** — radiology sections from the map (e.g. MRT, US gesamt, Mamma gesamt), or only the subset you requested
 - **Columns** — one per year found in the data, plus a **Gesamt** total and (if reference data is present) a **Benötigt** target column
 - **Cells** — count of examinations that belong to that section in that year
 - **Colour coding** on the Gesamt cell showing how close the physician is to reaching the required amount
@@ -120,6 +121,8 @@ cli/
 web/
   worker.py          iii HTTP worker — uses core/, streams xlsx back to client
 
+example_request.py   Standalone script for calling the web API
+
 requirements.txt      CLI dependencies (openpyxl)
 requirements-web.txt  Web worker dependencies (openpyxl + iii-sdk)
 ```
@@ -142,18 +145,27 @@ python -m cli.main <statistics.xlsx> <map.xlsx> [options]
 | `--output DIR` | `.` (current directory) | Directory where the output file is saved |
 | `--include-underscore` | off | Include `_`-prefixed section columns from the map |
 | `--reference FILE` | `reference_amount.xlsx` (auto-detected in CWD) | Path to the reference file with required amounts per section |
+| `--sections SECTION [...]` | all sections | One or more Leistungsbereich names to include (case-insensitive). Only those sections appear in the output, errors and unmatched rows are suppressed, and the names are appended to the filename. |
 
 ### Examples
 
 ```bash
-# Basic — auto-detects reference_amount.xlsx in the current directory
-python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx
+# Basic — all sections, auto-detects reference_amount.xlsx in the current directory
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx map.xlsx
 
 # Save to a specific folder
-python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --output ./reports
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx map.xlsx --output ./reports
 
-# Specify a custom reference file
-python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --reference targets_2024.xlsx
+# Custom reference file
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx map.xlsx --reference targets_2024.xlsx
+
+# Only include two sections — clean output, section names appended to filename
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx map.xlsx --sections "MRT Mamma" "MRT Prostata"
+
+# Filtered output with reference amounts
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx map.xlsx \
+  --sections "MRT Mamma" "CT Abdomen" \
+  --reference targets_2024.xlsx
 ```
 
 ---
@@ -226,13 +238,14 @@ Upload the statistics file as `multipart/form-data`. The map is loaded server-si
 |---|---|---|---|
 | `statistics` | file (`.xlsx`) | Yes | MitarbeiterStatistik export from the RIS |
 | `reference` | file (`.xlsx`) | No | Required amounts per section; adds colour-coded Benötigt column |
+| `sections` | JSON string | No | JSON array of Leistungsbereich names to include, e.g. `["MRT Mamma","CT Abdomen"]`. Absent or `null` → all sections. Names are matched case-insensitively against the server-side map. |
 
 **Responses:**
 
 | Status | Content-Type | Description |
 |---|---|---|
 | `200` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | Output xlsx file as a binary stream |
-| `400` | `application/json` | Bad request — missing required field or wrong content type |
+| `400` | `application/json` | Bad request — missing required field, malformed `sections` JSON, non-array type, or unknown section name |
 | `413` | `application/json` | Upload too large (> 50 MB per file, > 110 MB total) |
 | `422` | `application/json` | Validation failure — file is malformed, malicious, or structurally invalid |
 | `500` | `application/json` | Unexpected server error |
@@ -250,7 +263,7 @@ Error responses have the shape:
 #### curl
 
 ```bash
-# Minimal — statistics only
+# All sections
 curl -X POST http://localhost:<engine-port>/convert \
   -F "statistics=@2024_Statistik_DR_EXAMPLE.xlsx" \
   --output Auswertung.xlsx
@@ -260,28 +273,90 @@ curl -X POST http://localhost:<engine-port>/convert \
   -F "statistics=@2024_Statistik_DR_EXAMPLE.xlsx" \
   -F "reference=@reference_amount.xlsx" \
   --output Auswertung.xlsx
+
+# Filtered — only two sections
+curl -X POST http://localhost:<engine-port>/convert \
+  -F "statistics=@2024_Statistik_DR_EXAMPLE.xlsx" \
+  -F 'sections=["MRT Mamma","MRT Prostata"]' \
+  --output Auswertung.xlsx
 ```
 
-#### Python (requests)
+#### Python (example_request.py)
+
+The included `example_request.py` script covers the common cases:
+
+```bash
+# All sections
+python example_request.py 2024_Statistik_DR_EXAMPLE.xlsx
+
+# With reference amounts
+python example_request.py 2024_Statistik_DR_EXAMPLE.xlsx reference_amount.xlsx
+
+# Filtered — only selected sections (clean output, filename suffix added)
+python example_request.py 2024_Statistik_DR_EXAMPLE.xlsx --sections "MRT Mamma" "MRT Prostata"
+
+# Filtered with reference
+python example_request.py 2024_Statistik_DR_EXAMPLE.xlsx reference_amount.xlsx \
+  --sections "MRT Mamma" "CT Abdomen"
+```
+
+#### Python (requests library, minimal)
 
 ```python
+import json
 import requests
 
-with (
-    open("2024_Statistik_DR_EXAMPLE.xlsx", "rb") as stats,
-    open("reference_amount.xlsx", "rb") as ref,
-):
+with open("2024_Statistik_DR_EXAMPLE.xlsx", "rb") as stats:
     response = requests.post(
         "http://localhost:<engine-port>/convert",
         files={
-            "statistics": ("statistics.xlsx", stats, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-            "reference":  ("reference.xlsx",  ref,   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            "statistics": ("statistics.xlsx", stats,
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            "sections":   (None, json.dumps(["MRT Mamma", "CT Abdomen"]).encode(),
+                           "application/json"),
         },
     )
-    response.raise_for_status()
-    with open("Auswertung.xlsx", "wb") as out:
-        out.write(response.content)
+response.raise_for_status()
+with open("Auswertung.xlsx", "wb") as out:
+    out.write(response.content)
 ```
+
+---
+
+## Filtering by Leistungsbereich
+
+By default the output includes every section defined in the map. You can restrict the output to a specific subset by supplying one or more section names.
+
+### Behaviour when a filter is active
+
+- Only the requested sections appear as rows in the output.
+- Unmatched procedures (those not found in the map) are **excluded** — the output is clean.
+- Errors, warnings, and footer notices are **suppressed**.
+- The selected section names are appended to the output filename in CamelCase:
+  `DR_EXAMPLE2024Auswertung_MrtMamma_MrtProstata.xlsx`
+- The `Benötigt` column and colour coding still work normally if a reference file is provided.
+
+### Section name matching
+
+- Matching is **case-insensitive**: `"mrt mamma"` resolves to `"MRT Mamma"` as it appears in the map.
+- The canonical name from the map is always used in the output.
+- Duplicate names in the request are silently deduplicated.
+- An empty list (or omitting the field entirely) means **all sections are evaluated** — the default behaviour is preserved.
+
+### Validation and errors
+
+Every supplied name is validated before processing begins:
+
+| Problem | Error |
+|---|---|
+| Name not found in map | `Unknown Leistungsbereich: 'X'. The name was not found in the map.` |
+| Empty or whitespace-only string | `Invalid filter entry — section name must not be empty or whitespace-only.` |
+| Non-string value (e.g. integer in JSON array) | `Invalid filter entry — expected a string, got 'int': 42` |
+| Name longer than 200 characters | `Filter entry too long (201 characters; limit is 200): ...` |
+| More than 200 names in a single request | `Too many sections requested (201); at most 200 can be specified at once.` |
+| Formula injection attempt (`=`, `+`, `-`, `@`, `\|`, …) | `Invalid filter entry — looks like a formula injection attempt: '=...'` |
+
+On the web API, any validation failure returns HTTP `400` with a JSON error body. On the CLI, the error is printed to stderr and the process exits with code 1 — no output file is created.
 
 ---
 
@@ -291,24 +366,21 @@ with (
 
 Exported from the RIS (e.g. ORBIS MitarbeiterStatistik). Expected structure:
 
-- **G6** — label `Befunddatum`, **H6** — date range string
-- **G7** — label `Mitarbeiter`, **H7** — employee code
+- **Metadata rows** — labels `Mitarbeiter` and `Befunddatum` somewhere in the first 15 rows; adjacent cells hold the values used for the output filename
 - **L8** — total Befunddokumente count (displayed for reference only)
-- **Row 10** — column headers including `DokDatum`, `Leistung`, `Leist-Kurz`, `IND1`, `IND2`
-- **Rows 11+** — one row per individual Leistung; rows belonging to the same patient visit share the same `IND1` value and have sequential `IND2` values (1, 2, 3 …); only the first row in each group carries a `DokDatum`
+- **Header row** — contains `DokDatum`, `Leistung`, `Leist-Kurz`, `IND1`, `IND2` (searched in first 50 rows)
+- **Data rows** — one row per individual Leistung; rows belonging to the same patient visit share the same `IND1` value and have sequential `IND2` values (1, 2, 3 …); only the first row in each group carries a `DokDatum`
 
-The tool counts total Leistungen using an IND2-based group-end algorithm: when the next IND2 value is ≤ the current, the current row ends its group and its IND2 value is the group size.
+### map.xlsx
 
-### map.xlsx (Leistungen Map)
-
-A mapping table. Expected structure:
+A mapping table maintained server-side. Expected structure:
 
 - **B1** — must be `Leist0` (procedure code column)
 - **F1** — must be `DL Gefäße` (first section column)
 - **Column B** — procedure short codes matching `Leist-Kurz` in the statistics file
-- **Columns F onwards** — section names; a cell value of `1` means the procedure belongs to that section
+- **Columns F onwards** — section names; a cell value of `1` means the procedure belongs to that section; `2` means it counts twice; `0` means it does not belong
 
-Duplicate procedure codes are resolved automatically: if both entries have section assignments, values are merged by taking the maximum per column. A warning is written to the output noting which codes were affected.
+Duplicate procedure codes are resolved automatically: if both entries have section assignments, values are merged by taking the maximum per column. A notice is written to the output footer.
 
 ---
 
@@ -329,6 +401,7 @@ A two-column file with required examination counts per section:
 - Sections with an empty **Benötigt** cell are silently skipped
 - The **Benötigt** column only appears in the output when reference data is present
 - If the file (or upload field) is absent, the column is omitted entirely
+- Section name matching is case-insensitive
 
 ### Colour coding
 
@@ -347,7 +420,7 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 
 | Situation | Behaviour |
 |---|---|
-| H6 / H7 / L8 missing | Generic output filename + note in output file; processing continues |
+| Mitarbeiter / Befunddatum missing | Generic output filename + note in output file; processing continues |
 | `Leist-Kurz` column missing | Fatal error — file is not a valid statistics export |
 | `B1 ≠ Leist0` | Fatal error — map file is invalid |
 | `F1 ≠ DL Gefäße` | Structured error (recoverable — admin can supply a corrected map) |
@@ -363,6 +436,7 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 | Reference file fails security check | Logged as warning; Benötigt column omitted |
 | Individual reference row unparseable | That row skipped; rest of reference data used |
 | Section has no reference entry | Gesamt cell uncoloured; Benötigt cell left blank |
+| Unknown section name in filter | Fatal — 400 response (web) / exit code 1 (CLI); no output created |
 | Request body > 110 MB | 413 before file is read into memory |
 | Processing timeout (> 60 s) | 503 response; worker continues serving other requests |
 
@@ -381,5 +455,14 @@ All input files — including the optional reference file — are treated as pot
 - Every string cell value is checked for formula injection characters (`=`, `+`, `-`, `@`, `|`, …)
 - Reference amounts are bounds-checked (must be positive integers ≤ 1 000 000)
 - Map files are limited to 500 section columns to prevent memory exhaustion
-- All HTTP responses include `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`
-- Processing is time-limited to 60 seconds per request
+
+**Section filter validation** — when `--sections` / the `sections` API field is used:
+
+- Every supplied name is checked for formula injection prefixes before the whitelist lookup
+- Only names that exactly match a section in the server-side map are accepted (case-insensitive)
+- Partial matches and substrings are rejected
+- Error messages do not reveal which sections exist in the map
+- Item count (max 200) and item length (max 200 chars) are capped
+
+All HTTP responses include `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`.
+Processing is time-limited to 60 seconds per request.
