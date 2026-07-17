@@ -180,6 +180,7 @@ def _build_workbook(
     total_leistungen:  int | None      = result.get("total_leistungen")
     total_documents:   int | None      = result.get("total_documents")
     merged_duplicates: list[str]       = result.get("merged_duplicates", [])
+    unassigned:        list[dict]      = result.get("unassigned", [])
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -224,17 +225,31 @@ def _build_workbook(
     # Data sections not listed in the reference file are appended at the end.
     output_rows: list[tuple] = []   # (name, kind, components_or_None)
     seen: set[str] = set()
+    dropped_combos: list[str] = []  # (combo name, missing components) notices
 
     for name in _ref_order:
         if name in _combinations:
             components = _combinations[name]
-            if any(c not in data for c in components):
-                continue  # drop — at least one component is missing
+            missing = [c for c in components if c not in data]
+            if missing:
+                # drop — at least one component is missing; noted in the footer
+                dropped_combos.append(
+                    f"Kombination '{name}' entfällt — fehlende Bereiche: "
+                    + ", ".join(f"'{m}'" for m in missing)
+                )
+                continue
             output_rows.append((name, "combo", components))
             seen.add(name)
         elif name in data:
             output_rows.append((name, "regular", None))
             seen.add(name)
+        elif name in _ref:
+            # A reference row with a required amount that matches no data row —
+            # its target would silently vanish from the output. Surface it.
+            dropped_combos.append(
+                f"Referenzzeile '{name}' (Benötigt: {_ref[name]:,}) passt zu "
+                "keinem Leistungsbereich der Map — Zielwert wird nicht angezeigt."
+            )
 
     for name in data:
         if name not in seen:
@@ -346,6 +361,58 @@ def _build_workbook(
             c = ws.cell(row=next_row, column=1)
             c.value = f"    •  {code}"
             c.font = Font(name=_FONT, size=10, color=_TEXT_WARN)
+
+    # ── Dropped combinations / unmatched reference rows ──────────────────────
+    if dropped_combos:
+        next_row += 2
+        hl = ws.cell(row=next_row, column=1)
+        hl.value = "Hinweis: Referenzzeilen ohne Entsprechung in den Daten"
+        hl.font = Font(name=_FONT, size=10, bold=True, color=_TEXT_WARN)
+        ws.merge_cells(
+            start_row=next_row, start_column=1,
+            end_row=next_row, end_column=len(col_headers),
+        )
+        for note in dropped_combos:
+            next_row += 1
+            c = ws.cell(row=next_row, column=1)
+            c.value = f"    •  {note}"
+            c.font = Font(name=_FONT, size=10, color=_TEXT_WARN)
+            ws.merge_cells(
+                start_row=next_row, start_column=1,
+                end_row=next_row, end_column=len(col_headers),
+            )
+
+    # ── Unassigned map entries ────────────────────────────────────────────────
+    # Leistungen that ARE in the map but belong to no section — they were
+    # counted in no row above. Listed here so nothing is silently lost.
+    if unassigned:
+        total_unassigned = sum(u.get("count", 0) for u in unassigned)
+        next_row += 2
+        hl = ws.cell(row=next_row, column=1)
+        hl.value = (
+            f"Nicht zugeordnete Leistungen: {total_unassigned:,} "
+            f"({len(unassigned)} Codes) — in der Map ohne Leistungsbereich, "
+            "in keiner Bereichszeile enthalten"
+        )
+        hl.font = Font(name=_FONT, size=10, bold=True, color=_TEXT_WARN)
+        ws.merge_cells(
+            start_row=next_row, start_column=1,
+            end_row=next_row, end_column=len(col_headers),
+        )
+        ws.row_dimensions[next_row].height = 22
+
+        for entry in unassigned:
+            next_row += 1
+            c = ws.cell(row=next_row, column=1)
+            kurztext = entry.get("kurztext") or ""
+            label = f" ({kurztext})" if kurztext else ""
+            c.value = f"    •  {entry.get('leist_kurz')}{label}"
+            c.font = Font(name=_FONT, size=9, color=_TEXT_MUTED)
+
+            n = ws.cell(row=next_row, column=2)
+            n.value = entry.get("count", 0)
+            n.font = Font(name=_FONT, size=9, color=_TEXT_MUTED)
+            n.alignment = Alignment(horizontal="right")
 
     # ── Errors / warnings section ─────────────────────────────────────────────
     if errors:
