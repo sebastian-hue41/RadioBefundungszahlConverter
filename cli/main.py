@@ -15,7 +15,7 @@ independent of this CLI so they can be called directly from a future API layer.
 import argparse
 import sys
 
-from input_handler import (
+from core.input_handler import (
     FileValidationError,
     MapValidationError,
     StatsValidationError,
@@ -23,8 +23,8 @@ from input_handler import (
     load_reference_data,
     load_statistics,
 )
-from logic import process
-from output_handler import save_output
+from core.logic import process
+from core.output_handler import save_output
 
 
 def _build_parser() -> argparse.ArgumentParser:

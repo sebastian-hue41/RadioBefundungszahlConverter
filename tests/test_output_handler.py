@@ -1,32 +1,28 @@
-"""Tests for output_handler.py — xlsx generation and styling."""
+"""Tests for core/output_handler.py — xlsx generation, styling, and in-memory build."""
 
+import io
 from pathlib import Path
 
 import openpyxl
 import pytest
 
-from output_handler import save_output
+from core.output_handler import build_xlsx_bytes, save_output
 from .helpers import make_result
 
 
 class TestSaveOutput:
-    """Tests for output file generation."""
+    """save_output — disk-based xlsx generation (reused from main)."""
 
     def test_save_output_creates_file(self, tmp_path):
-        """Output file is created at specified directory."""
         result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
         path = save_output(result, output_dir=str(tmp_path))
         assert Path(path).exists()
         assert Path(path).parent == tmp_path
 
     def test_save_output_filename_from_metadata(self, tmp_path):
-        """Filename uses mitarbeiter + befunddatum."""
         result = make_result(
-            ["MRT"],
-            {"MRT": {2024: 10}},
-            [2024],
-            mitarbeiter="KUNZ_A",
-            befunddatum="01012024-31122024",
+            ["MRT"], {"MRT": {2024: 10}}, [2024],
+            mitarbeiter="KUNZ_A", befunddatum="01012024-31122024",
         )
         path = save_output(result, output_dir=str(tmp_path))
         filename = Path(path).name
@@ -35,256 +31,510 @@ class TestSaveOutput:
         assert "Auswertung" in filename
 
     def test_save_output_filename_generic_when_missing(self, tmp_path):
-        """Fallback timestamped filename when metadata missing."""
         result = make_result(
-            ["MRT"],
-            {"MRT": {2024: 10}},
-            [2024],
-            mitarbeiter=None,
-            befunddatum=None,
+            ["MRT"], {"MRT": {2024: 10}}, [2024],
+            mitarbeiter=None, befunddatum=None,
         )
         path = save_output(result, output_dir=str(tmp_path))
         filename = Path(path).name
-        assert "Auswertung_" in filename  # Timestamped
+        assert "Auswertung_" in filename
         assert filename.endswith(".xlsx")
 
     def test_save_output_year_columns_present(self, tmp_path):
-        """Output has columns for each year."""
         result = make_result(["MRT"], {"MRT": {2024: 5, 2025: 3}}, [2024, 2025])
         path = save_output(result, output_dir=str(tmp_path))
-
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        header_row = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
-        assert "2024" in header_row
-        assert "2025" in header_row
-        assert "Gesamt" in header_row
+        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        assert "2024" in header
+        assert "2025" in header
+        assert "Gesamt" in header
 
     def test_save_output_gesamt_column_correct_totals(self, tmp_path):
-        """Gesamt column has correct totals."""
-        result = make_result(
-            ["MRT"],
-            {"MRT": {2024: 5, 2025: 3}},
-            [2024, 2025],
-        )
+        result = make_result(["MRT"], {"MRT": {2024: 5, 2025: 3}}, [2024, 2025])
         path = save_output(result, output_dir=str(tmp_path))
-
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
-        # Find Gesamt column
         header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         gesamt_idx = header.index("Gesamt") + 1
-        # MRT row (row 2)
-        gesamt_value = ws.cell(2, gesamt_idx).value
-        assert gesamt_value == 8  # 5 + 3
+        assert ws.cell(2, gesamt_idx).value == 8
 
     def test_save_output_without_reference_no_benoetigt_column(self, tmp_path):
-        """Without reference_amounts, no Benötigt column."""
         result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
         path = save_output(result, output_dir=str(tmp_path), reference_amounts=None)
-
         wb = openpyxl.load_workbook(path)
         ws = wb.active
         header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         assert "Benötigt" not in header
 
     def test_save_output_with_reference_has_benoetigt_column(self, tmp_path):
-        """With reference_amounts, Benötigt column present."""
         result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
-        ref = {"MRT": 3000}
-        path = save_output(result, output_dir=str(tmp_path), reference_amounts=ref)
-
+        path = save_output(result, output_dir=str(tmp_path), reference_amounts={"MRT": 3000})
         wb = openpyxl.load_workbook(path)
         ws = wb.active
         header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         assert "Benötigt" in header
 
     def test_save_output_benoetigt_values_written(self, tmp_path):
-        """Benötigt column contains correct reference amounts."""
-        result = make_result(["MRT", "CT"], {"MRT": {2024: 10}, "CT": {2024: 5}}, [2024])
-        ref = {"MRT": 3000, "CT": 4000}
-        path = save_output(result, output_dir=str(tmp_path), reference_amounts=ref)
-
+        result = make_result(
+            ["MRT", "CT"],
+            {"MRT": {2024: 10}, "CT": {2024: 5}},
+            [2024],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_amounts={"MRT": 3000, "CT": 4000})
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
         header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         benoetigt_idx = header.index("Benötigt") + 1
-        # MRT row (row 2)
-        mrt_benoetigt = ws.cell(2, benoetigt_idx).value
-        assert mrt_benoetigt == 3000
-        # CT row (row 3)
-        ct_benoetigt = ws.cell(3, benoetigt_idx).value
-        assert ct_benoetigt == 4000
+        assert ws.cell(2, benoetigt_idx).value == 3000
+        assert ws.cell(3, benoetigt_idx).value == 4000
 
     def test_save_output_reference_lookup_case_insensitive(self, tmp_path):
-        """Reference lookup is case-insensitive."""
         result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
-        ref = {"mrt": 3000}  # Lowercase in reference
-        path = save_output(result, output_dir=str(tmp_path), reference_amounts=ref)
-
+        path = save_output(result, output_dir=str(tmp_path), reference_amounts={"mrt": 3000})
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
         header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         benoetigt_idx = header.index("Benötigt") + 1
-        benoetigt_value = ws.cell(2, benoetigt_idx).value
-        assert benoetigt_value == 3000
+        assert ws.cell(2, benoetigt_idx).value == 3000
 
     def test_save_output_no_cf_without_reference(self, tmp_path):
-        """No conditional formatting when reference is absent."""
         result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
         path = save_output(result, output_dir=str(tmp_path), reference_amounts=None)
-
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        # Check that no CF rules exist
-        cf_ranges = list(ws.conditional_formatting)
-        assert len(cf_ranges) == 0
+        assert len(list(ws.conditional_formatting)) == 0
 
     def test_save_output_cf_rules_present_with_reference(self, tmp_path):
-        """Conditional formatting rules added when reference present."""
-        result = make_result(["MRT", "CT"], {"MRT": {2024: 10}, "CT": {2024: 5}}, [2024])
-        ref = {"MRT": 3000, "CT": 4000}
-        path = save_output(result, output_dir=str(tmp_path), reference_amounts=ref)
-
+        result = make_result(
+            ["MRT", "CT"],
+            {"MRT": {2024: 10}, "CT": {2024: 5}},
+            [2024],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_amounts={"MRT": 3000, "CT": 4000})
         wb = openpyxl.load_workbook(path)
         ws = wb.active
-        cf_ranges = list(ws.conditional_formatting)
-        assert len(cf_ranges) > 0  # At least one CF range
+        assert len(list(ws.conditional_formatting)) > 0
 
     def test_save_output_footer_count_summary(self, tmp_path):
-        """Footer includes count summary."""
-        result = make_result(
-            ["MRT"],
-            {"MRT": {2024: 10}},
-            [2024],
-            total_counted=10,
-        )
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024], total_counted=10)
         path = save_output(result, output_dir=str(tmp_path))
-
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
-        # Search for "Gezählte Leistungen" in the sheet
-        found = False
-        for row in ws.iter_rows(values_only=True):
-            if any("Gezählte" in str(v or "") for v in row):
-                found = True
-                break
+        found = any(
+            "Gezählte" in str(v or "")
+            for row in ws.iter_rows(values_only=True)
+            for v in row
+        )
         assert found
 
     def test_save_output_footer_mismatch_warning(self, tmp_path):
-        """Footer includes COUNT MISMATCH warning when applicable."""
         result = make_result(
-            ["MRT"],
-            {"MRT": {2024: 10}},
-            [2024],
-            total_counted=10,
-            total_leistungen=15,  # Mismatch
+            ["MRT"], {"MRT": {2024: 10}}, [2024],
+            total_counted=10, total_leistungen=15,
         )
         path = save_output(result, output_dir=str(tmp_path))
-
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
-        # Search for "ABWEICHUNG" (German for "DEVIATION/MISMATCH")
-        found = False
-        for row in ws.iter_rows(values_only=True):
-            if any("ABWEICHUNG" in str(v or "") for v in row):
-                found = True
-                break
+        found = any(
+            "ABWEICHUNG" in str(v or "")
+            for row in ws.iter_rows(values_only=True)
+            for v in row
+        )
         assert found
 
     def test_save_output_errors_section(self, tmp_path):
-        """Errors from result are included in output."""
         result = make_result(
-            ["MRT"],
-            {"MRT": {2024: 10}},
-            [2024],
+            ["MRT"], {"MRT": {2024: 10}}, [2024],
             errors=["WARNING: Test error 1", "ERROR: Test error 2"],
         )
         path = save_output(result, output_dir=str(tmp_path))
-
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
-        all_values = []
-        for row in ws.iter_rows(values_only=True):
-            all_values.extend(str(v or "") for v in row)
-        full_text = " ".join(all_values)
+        full_text = " ".join(
+            str(v or "") for row in ws.iter_rows(values_only=True) for v in row
+        )
         assert "Test error 1" in full_text
         assert "Test error 2" in full_text
 
     def test_save_output_merged_duplicates_notice(self, tmp_path):
-        """Merged duplicates notice appears when applicable."""
         result = make_result(
-            ["MRT"],
-            {"MRT": {2024: 10}},
-            [2024],
+            ["MRT"], {"MRT": {2024: 10}}, [2024],
             merged_duplicates=["CODE1", "CODE2"],
         )
         path = save_output(result, output_dir=str(tmp_path))
-
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
-        all_values = []
-        for row in ws.iter_rows(values_only=True):
-            all_values.extend(str(v or "") for v in row)
-        full_text = " ".join(all_values)
+        full_text = " ".join(
+            str(v or "") for row in ws.iter_rows(values_only=True) for v in row
+        )
         assert "CODE1" in full_text
         assert "CODE2" in full_text
 
     def test_save_output_multiple_sections(self, tmp_path):
-        """Output with multiple sections laid out correctly."""
         result = make_result(
             ["MRT", "CT", "US"],
-            {
-                "MRT": {2024: 100, 2025: 50},
-                "CT": {2024: 200, 2025: 150},
-                "US": {2024: 300, 2025: 250},
-            },
+            {"MRT": {2024: 100, 2025: 50}, "CT": {2024: 200, 2025: 150}, "US": {2024: 300, 2025: 250}},
             [2024, 2025],
         )
         path = save_output(result, output_dir=str(tmp_path))
-
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
-        # Check that all sections appear
         first_col = [ws.cell(r, 1).value for r in range(1, 10)]
         assert "MRT" in first_col
         assert "CT" in first_col
         assert "US" in first_col
 
     def test_save_output_zero_counts_displayed(self, tmp_path):
-        """Sections with zero counts are displayed as 0."""
         result = make_result(
             ["MRT", "CT"],
             {"MRT": {2024: 10}, "CT": {2024: 0}},
             [2024],
         )
         path = save_output(result, output_dir=str(tmp_path))
-
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
-        # CT total should be 0
-        # Find CT row (row 3), Gesamt column (column 3)
-        ct_total = ws.cell(3, 3).value
-        assert ct_total == 0
+        assert ws.cell(3, 3).value == 0
 
     def test_save_output_handles_missing_reference_for_section(self, tmp_path):
-        """Sections without reference entry still render (Benötigt left blank)."""
         result = make_result(
             ["MRT", "CT"],
             {"MRT": {2024: 10}, "CT": {2024: 5}},
             [2024],
         )
-        ref = {"MRT": 3000}  # CT not in reference
-        path = save_output(result, output_dir=str(tmp_path), reference_amounts=ref)
-
+        path = save_output(result, output_dir=str(tmp_path), reference_amounts={"MRT": 3000})
         wb = openpyxl.load_workbook(path, data_only=True)
         ws = wb.active
         header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
         benoetigt_idx = header.index("Benötigt") + 1
-        # MRT has value
-        mrt_benoetigt = ws.cell(2, benoetigt_idx).value
-        assert mrt_benoetigt == 3000
-        # CT should be None or empty
-        ct_benoetigt = ws.cell(3, benoetigt_idx).value
-        # Should not raise; value can be None or empty
+        assert ws.cell(2, benoetigt_idx).value == 3000
+        # CT has no reference — cell should be blank (None)
+        assert ws.cell(3, benoetigt_idx).value is None
 
+
+# ── TestBuildXlsxBytes (web-specific) ─────────────────────────────────────────
+
+class TestBuildXlsxBytes:
+    """build_xlsx_bytes — in-memory xlsx generation for the web worker."""
+
+    def test_returns_filename_and_bytes(self):
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
+        filename, data = build_xlsx_bytes(result)
+        assert isinstance(filename, str)
+        assert isinstance(data, bytes)
+        assert filename.endswith(".xlsx")
+
+    def test_bytes_are_valid_xlsx(self):
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
+        _, data = build_xlsx_bytes(result)
+        wb = openpyxl.load_workbook(io.BytesIO(data))
+        assert wb.active is not None
+
+    def test_filename_uses_metadata(self):
+        result = make_result(
+            ["MRT"], {"MRT": {2024: 10}}, [2024],
+            mitarbeiter="KUNZ_A", befunddatum="01012024-31122024",
+        )
+        filename, _ = build_xlsx_bytes(result)
+        assert "KUNZ_A" in filename
+        assert "Auswertung" in filename
+
+    def test_filename_generic_when_no_metadata(self):
+        result = make_result(
+            ["MRT"], {"MRT": {2024: 10}}, [2024],
+            mitarbeiter=None, befunddatum=None,
+        )
+        filename, _ = build_xlsx_bytes(result)
+        assert "Auswertung_" in filename
+
+    def test_with_reference_has_benoetigt_column(self):
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
+        _, data = build_xlsx_bytes(result, reference_amounts={"MRT": 3000})
+        wb = openpyxl.load_workbook(io.BytesIO(data))
+        ws = wb.active
+        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        assert "Benötigt" in header
+
+    def test_content_matches_save_output(self, tmp_path):
+        """build_xlsx_bytes and save_output produce equivalent cell content."""
+        result = make_result(
+            ["MRT", "CT"],
+            {"MRT": {2024: 100, 2025: 50}, "CT": {2024: 200, 2025: 150}},
+            [2024, 2025],
+            mitarbeiter="DOC", befunddatum="2024",
+        )
+        ref = {"MRT": 3000, "CT": 4000}
+
+        _, data = build_xlsx_bytes(result, reference_amounts=ref)
+        disk_path = save_output(result, output_dir=str(tmp_path), reference_amounts=ref)
+
+        wb_mem  = openpyxl.load_workbook(io.BytesIO(data), data_only=True)
+        wb_disk = openpyxl.load_workbook(disk_path, data_only=True)
+
+        ws_mem  = wb_mem.active
+        ws_disk = wb_disk.active
+
+        # Compare all data rows cell by cell
+        for r in range(1, len(result["data"]) + 3):
+            for c in range(1, ws_mem.max_column + 1):
+                assert ws_mem.cell(r, c).value == ws_disk.cell(r, c).value, \
+                    f"Mismatch at row={r} col={c}"
+
+    def test_no_disk_write(self, tmp_path, monkeypatch):
+        """build_xlsx_bytes must not write to disk."""
+        written = []
+        original_save = openpyxl.Workbook.save
+
+        def _spy_save(self, filename):
+            if not isinstance(filename, io.BytesIO):
+                written.append(filename)
+            return original_save(self, filename)
+
+        monkeypatch.setattr(openpyxl.Workbook, "save", _spy_save)
+
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
+        build_xlsx_bytes(result)
+        assert written == [], f"build_xlsx_bytes wrote to disk: {written}"
+
+
+# ── TestCombinationRows ────────────────────────────────────────────────────────
+
+class TestCombinationRows:
+    """Combination rows: summed values, dropped when component missing."""
+
+    def _ref_data(self, amounts, combinations, order=None):
+        return {
+            "amounts": amounts,
+            "combinations": combinations,
+            "order": order or list(amounts.keys()),
+        }
+
+    def test_combination_row_inserted_in_output(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 10}, "B": {2024: 20}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        first_col = [ws.cell(r, 1).value for r in range(1, 10)]
+        assert "Combo" in first_col
+
+    def test_combination_year_cell_is_sum(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 10}, "B": {2024: 20}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
+        assert ws.cell(combo_row, 2).value == 30  # 10 + 20
+
+    def test_combination_gesamt_is_sum(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 10}, "B": {2024: 20}},
+            [2024],
+            total_counted=30,
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        gesamt_col = header.index("Gesamt") + 1
+        combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
+        assert ws.cell(combo_row, gesamt_col).value == 30  # 10 + 20
+
+    def test_combination_sum_across_multiple_years(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2022: 100, 2023: 200}, "B": {2022: 50, 2023: 75}},
+            [2022, 2023],
+            total_counted=425,
+        )
+        ref = self._ref_data(
+            {"Combo": 500},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        col_2022 = header.index("2022") + 1
+        col_2023 = header.index("2023") + 1
+        gesamt_col = header.index("Gesamt") + 1
+        combo_row = next(r for r in range(2, 15) if ws.cell(r, 1).value == "Combo")
+        assert ws.cell(combo_row, col_2022).value == 150   # 100 + 50
+        assert ws.cell(combo_row, col_2023).value == 275   # 200 + 75
+        assert ws.cell(combo_row, gesamt_col).value == 425  # 150 + 275
+
+    def test_combination_three_components_sum(self, tmp_path):
+        result = make_result(
+            ["X", "Y", "Z"],
+            {"X": {2024: 1000}, "Y": {2024: 500}, "Z": {2024: 250}},
+            [2024],
+            total_counted=1750,
+        )
+        ref = self._ref_data(
+            {"Triple": 2000},
+            {"Triple": ["X", "Y", "Z"]},
+            order=["Triple", "X", "Y", "Z"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        header = [ws.cell(1, c).value for c in range(1, ws.max_column + 1)]
+        gesamt_col = header.index("Gesamt") + 1
+        combo_row = next(r for r in range(2, 15) if ws.cell(r, 1).value == "Triple")
+        assert ws.cell(combo_row, 2).value == 1750   # 1000 + 500 + 250
+        assert ws.cell(combo_row, gesamt_col).value == 1750
+
+    def test_combination_component_with_zero_counts(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 0}, "B": {2024: 42}},
+            [2024],
+            total_counted=42,
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
+        assert ws.cell(combo_row, 2).value == 42  # 0 + 42
+
+    def test_combination_year_cell_is_not_string(self, tmp_path):
+        result = make_result(
+            ["A", "B"],
+            {"A": {2024: 10}, "B": {2024: 20}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        combo_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "Combo")
+        assert isinstance(ws.cell(combo_row, 2).value, (int, float))
+
+    def test_combination_dropped_when_component_missing(self, tmp_path):
+        result = make_result(
+            ["A"],          # only A in data, B is missing
+            {"A": {2024: 10}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        first_col = [ws.cell(r, 1).value for r in range(1, 10)]
+        assert "Combo" not in first_col
+        assert "A" in first_col
+
+    def test_regular_sections_still_appear_with_combinations(self, tmp_path):
+        result = make_result(
+            ["A", "B", "C"],
+            {"A": {2024: 5}, "B": {2024: 15}, "C": {2024: 25}},
+            [2024],
+        )
+        ref = self._ref_data(
+            {"Combo": 100},
+            {"Combo": ["A", "B"]},
+            order=["Combo", "A", "B", "C"],
+        )
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        first_col = [ws.cell(r, 1).value for r in range(1, 15)]
+        assert "Combo" in first_col
+        assert "A" in first_col
+        assert "B" in first_col
+        assert "C" in first_col
+
+    def test_sections_not_in_ref_order_appended_at_end(self, tmp_path):
+        result = make_result(
+            ["A", "B", "Extra"],
+            {"A": {2024: 5}, "B": {2024: 10}, "Extra": {2024: 99}},
+            [2024],
+        )
+        ref = self._ref_data({}, {}, order=["A", "B"])
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path, data_only=True)
+        ws = wb.active
+        first_col = [ws.cell(r, 1).value for r in range(2, 10) if ws.cell(r, 1).value]
+        assert first_col.index("A") < first_col.index("Extra")
+        assert first_col.index("B") < first_col.index("Extra")
+
+
+# ── TestBoldOnReferenceAmount ──────────────────────────────────────────────────
+
+class TestBoldOnReferenceAmount:
+    """Rows with a reference amount render all text cells bold."""
+
+    def _ref_data(self, amounts):
+        return {"amounts": amounts, "combinations": {}, "order": list(amounts.keys())}
+
+    def test_section_name_bold_when_has_reference(self, tmp_path):
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
+        ref = self._ref_data({"MRT": 3000})
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        assert ws.cell(2, 1).font.bold is True
+
+    def test_section_name_not_bold_without_reference(self, tmp_path):
+        result = make_result(["CT"], {"CT": {2024: 5}}, [2024])
+        ref = self._ref_data({"MRT": 3000})  # MRT has ref, CT does not
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        # Find CT row
+        ct_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "CT")
+        assert not ws.cell(ct_row, 1).font.bold
+
+    def test_year_cell_bold_when_has_reference(self, tmp_path):
+        result = make_result(["MRT"], {"MRT": {2024: 10}}, [2024])
+        ref = self._ref_data({"MRT": 3000})
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        assert ws.cell(2, 2).font.bold is True  # year column cell
+
+    def test_year_cell_not_bold_without_reference(self, tmp_path):
+        result = make_result(["CT"], {"CT": {2024: 5}}, [2024])
+        ref = self._ref_data({"MRT": 3000})
+        path = save_output(result, output_dir=str(tmp_path), reference_data=ref)
+        wb = openpyxl.load_workbook(path)
+        ws = wb.active
+        ct_row = next(r for r in range(2, 10) if ws.cell(r, 1).value == "CT")
+        assert not ws.cell(ct_row, 2).font.bold

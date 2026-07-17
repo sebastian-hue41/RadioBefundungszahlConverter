@@ -3,6 +3,10 @@ input_handler.py — file validation and loading for statistics.xlsx and map.xls
 
 All inputs are treated as potentially malicious. Validation is strict.
 Designed for server-side use: no interactive prompts, structured errors only.
+
+Both loaders accept a file-system path (str / Path) OR in-memory bytes / BytesIO
+so the same code is used by the CLI and the iii web worker without any disk writes
+on the server side.
 """
 
 import io
@@ -11,16 +15,25 @@ import re
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Union
 
 import openpyxl
 
 log = logging.getLogger(__name__)
 
+# Type alias accepted by both loaders.
+XlsxSource = Union[str, Path, bytes, io.BytesIO]
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 MAX_FILE_SIZE_MB = 50
 MAX_DATA_ROWS = 500_000
+MAX_MAP_COLUMNS = 500
 ALLOWED_EXTENSIONS = {".xlsx"}
+
+# Zip bomb limits: per-entry ratio and total uncompressed budget.
+_MAX_ENTRY_RATIO = 50        # compressed → uncompressed inflation per zip entry
+_MAX_UNCOMPRESSED_MB = 200   # total uncompressed content across the whole archive
 
 _MAX_REFERENCE_ROWS = 10_000
 _MAX_REFERENCE_AMOUNT = 1_000_000
@@ -52,6 +65,68 @@ class MapValidationError(ValueError):
 
 # ── Shared security validation ─────────────────────────────────────────────────
 
+def _validate_zip_content(data: bytes, label: str) -> None:
+    """
+    Inspect xlsx bytes as a zip archive.
+    Shared by both the path-based and bytes-based validators.
+    Raises FileValidationError on any problem.
+
+    Checks performed:
+      - Valid zip structure
+      - Presence of xl/workbook.xml (xlsx marker)
+      - Absence of VBA macros
+      - No path-traversal entry names (absolute paths or ".." components)
+      - No zip bomb: per-entry compression ratio and total uncompressed size
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
+            infos = zf.infolist()
+            names = [i.filename for i in infos]
+
+            # Path traversal: reject absolute paths or parent-directory components.
+            for name in names:
+                parts = name.replace("\\", "/").split("/")
+                if name.startswith("/") or ".." in parts:
+                    raise FileValidationError(
+                        f"Zip entry contains a suspicious path {name!r}: {label}"
+                    )
+
+            if "xl/workbook.xml" not in names:
+                raise FileValidationError(
+                    f"File does not appear to be a valid xlsx (xl/workbook.xml missing): {label}"
+                )
+            if any(n.startswith("xl/vbaProject") for n in names):
+                raise FileValidationError(
+                    f"File contains VBA macros and cannot be processed safely: {label}"
+                )
+
+            # Zip bomb: per-entry inflation ratio.
+            total_uncompressed = 0
+            for info in infos:
+                total_uncompressed += info.file_size
+                if info.compress_size > 0 and info.file_size > 0:
+                    ratio = info.file_size / info.compress_size
+                    if ratio > _MAX_ENTRY_RATIO:
+                        raise FileValidationError(
+                            f"Zip entry {info.filename!r} has an extreme compression ratio "
+                            f"({ratio:.0f}:1) — possible zip bomb: {label}"
+                        )
+
+            # Zip bomb: total uncompressed budget.
+            max_bytes = _MAX_UNCOMPRESSED_MB * 1024 * 1024
+            if total_uncompressed > max_bytes:
+                raise FileValidationError(
+                    f"File total uncompressed content "
+                    f"({total_uncompressed // (1024 * 1024)} MB) "
+                    f"exceeds the {_MAX_UNCOMPRESSED_MB} MB limit: {label}"
+                )
+
+    except zipfile.BadZipFile as exc:
+        raise FileValidationError(
+            f"File is not a valid xlsx archive (corrupt or disguised file): {label}"
+        ) from exc
+
+
 def validate_xlsx_file(path: str) -> Path:
     """
     Validates that `path` points to a safe, well-formed xlsx file.
@@ -65,10 +140,8 @@ def validate_xlsx_file(path: str) -> Path:
 
     if not p.exists():
         raise FileValidationError(f"File not found: {p}")
-
     if not p.is_file():
         raise FileValidationError(f"Path does not point to a file: {p}")
-
     if p.suffix.lower() not in ALLOWED_EXTENSIONS:
         raise FileValidationError(
             f"Unsupported file type '{p.suffix}' — only .xlsx files are accepted: {p.name}"
@@ -77,31 +150,29 @@ def validate_xlsx_file(path: str) -> Path:
     size_bytes = p.stat().st_size
     if size_bytes == 0:
         raise FileValidationError(f"File is empty (0 bytes): {p.name}")
-
     size_mb = size_bytes / (1024 * 1024)
     if size_mb > MAX_FILE_SIZE_MB:
         raise FileValidationError(
             f"File is too large ({size_mb:.1f} MB, limit is {MAX_FILE_SIZE_MB} MB): {p.name}"
         )
 
-    # xlsx files are zip archives — verify the container and reject macros.
-    try:
-        with zipfile.ZipFile(p, "r") as zf:
-            names = zf.namelist()
-            if "xl/workbook.xml" not in names:
-                raise FileValidationError(
-                    f"File does not appear to be a valid xlsx (xl/workbook.xml missing): {p.name}"
-                )
-            if any(n.startswith("xl/vbaProject") for n in names):
-                raise FileValidationError(
-                    f"File contains VBA macros and cannot be processed safely: {p.name}"
-                )
-    except zipfile.BadZipFile as exc:
-        raise FileValidationError(
-            f"File is not a valid xlsx archive (corrupt or disguised file): {p.name}"
-        ) from exc
-
+    _validate_zip_content(p.read_bytes(), p.name)
     return p
+
+
+def validate_xlsx_bytes(data: bytes, name: str = "upload") -> None:
+    """
+    Validates xlsx content supplied as raw bytes (e.g. from an HTTP upload).
+    Raises FileValidationError on any problem.
+    """
+    if not data:
+        raise FileValidationError(f"File is empty: {name}")
+    size_mb = len(data) / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        raise FileValidationError(
+            f"File is too large ({size_mb:.1f} MB, limit is {MAX_FILE_SIZE_MB} MB): {name}"
+        )
+    _validate_zip_content(data, name)
 
 
 def _check_cell_for_injection(value, context: str = "") -> None:
@@ -148,25 +219,41 @@ def _parse_year(value) -> int | None:
     return None
 
 
-def load_statistics(path: str) -> dict:
+def _resolve_source(source: XlsxSource, label: str) -> "Path | io.BytesIO":
+    """
+    Validate and normalise a source to either a Path (CLI) or BytesIO (web).
+    Raises FileValidationError on any security or format problem.
+    """
+    if isinstance(source, (bytes, io.BytesIO)):
+        data = source if isinstance(source, bytes) else source.read()
+        validate_xlsx_bytes(data, label)
+        return io.BytesIO(data)
+    return validate_xlsx_file(str(source))
+
+
+def load_statistics(source: XlsxSource) -> dict:
     """
     Loads and validates the statistics xlsx file.
 
+    `source` may be a file-system path (str / Path) or in-memory data
+    (bytes / BytesIO) — the same validation and parsing runs in both cases.
+
     Returns a dict:
-        mitarbeiter    str | None
-        befunddatum    str | None
-        total          int | None   (expected examination count from L8)
-        leistungen     list[dict]   (one entry per data row)
-        errors         list[str]    (non-fatal warnings accumulated during load)
+        mitarbeiter      str | None
+        befunddatum      str | None
+        total_documents  int | None   (L8 — Befunddokumente count, informational)
+        total_leistungen int | None   (IND2-algorithm total, used for count check)
+        leistungen       list[dict]   (one entry per data row)
+        errors           list[str]    (non-fatal warnings accumulated during load)
 
     Raises StatsValidationError for fatal structural problems.
     Raises FileValidationError for file-level security problems.
     """
-    p = validate_xlsx_file(path)
+    src = _resolve_source(source, "statistics.xlsx")
     errors: list[str] = []
 
     try:
-        wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
     except Exception as exc:
         raise StatsValidationError(f"Cannot open statistics file: {exc}") from exc
 
@@ -366,9 +453,12 @@ def load_statistics(path: str) -> dict:
 
 # ── Map loader ─────────────────────────────────────────────────────────────────
 
-def load_map(path: str, include_underscore_columns: bool = False) -> dict:
+def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> dict:
     """
     Loads and validates the map xlsx file.
+
+    `source` may be a file-system path (str / Path) or in-memory data
+    (bytes / BytesIO).
 
     Parameters
     ----------
@@ -384,10 +474,10 @@ def load_map(path: str, include_underscore_columns: bool = False) -> dict:
     Raises MapValidationError for structural/content problems.
     Raises FileValidationError for file-level security problems.
     """
-    p = validate_xlsx_file(path)
+    src = _resolve_source(source, "map.xlsx")
 
     try:
-        wb = openpyxl.load_workbook(p, read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
     except Exception as exc:
         raise MapValidationError(f"Cannot open map file: {exc}") from exc
 
@@ -438,6 +528,13 @@ def load_map(path: str, include_underscore_columns: bool = False) -> dict:
             raise MapValidationError(
                 "No section columns found starting from column F. "
                 "Please verify the map file structure."
+            )
+
+        if len(sections) > MAX_MAP_COLUMNS:
+            raise MapValidationError(
+                f"Map file contains {len(sections)} section columns, "
+                f"which exceeds the limit of {MAX_MAP_COLUMNS}. "
+                "Please verify the file is not malformed."
             )
 
         # ── Read leistung rows ─────────────────────────────────────────────
@@ -548,9 +645,12 @@ def load_map(path: str, include_underscore_columns: bool = False) -> dict:
 
 # ── Reference amounts loader ───────────────────────────────────────────────────
 
-def load_reference_data(path: str) -> dict:
+def load_reference_data(source: XlsxSource) -> "dict":
     """
-    Loads the full reference structure from a reference xlsx file.
+    Loads the full reference structure from a reference xlsx.
+
+    Accepts the same XlsxSource union as the other loaders (path or BytesIO),
+    so it works identically from the CLI (path) and the web worker (bytes).
 
     Expected format (reference_amount.xlsx):
         Row 1 : headers — 'Leistungsbereich' | 'Benötigt' | 'Includiert' (optional)
@@ -569,32 +669,21 @@ def load_reference_data(path: str) -> dict:
     """
     empty: dict = {"amounts": {}, "combinations": {}, "order": []}
 
-    # ── Path resolution ────────────────────────────────────────────────────────
+    # ── Validate and normalise source ──────────────────────────────────────────
     try:
-        p = Path(path).resolve()
-    except Exception as exc:
-        log.warning("Reference amounts: cannot resolve path %r: %s", path, exc)
-        return empty
-
-    if not p.exists():
-        log.warning("Reference amounts file not found: %s", p)
-        return empty
-
-    # ── Security validation (reuse existing checks) ────────────────────────────
-    try:
-        validate_xlsx_file(str(p))
+        src = _resolve_source(source, "reference_amount.xlsx")
     except FileValidationError as exc:
         log.warning("Reference amounts file failed security validation: %s", exc)
         return empty
     except Exception as exc:
-        log.warning("Reference amounts: unexpected validation error for %s: %s", p.name, exc)
+        log.warning("Reference amounts: unexpected validation error: %s", exc)
         return empty
 
     # ── Open workbook ──────────────────────────────────────────────────────────
     try:
-        wb = openpyxl.load_workbook(str(p), read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
     except Exception as exc:
-        log.warning("Reference amounts: cannot open %s: %s", p.name, exc)
+        log.warning("Reference amounts: cannot open file: %s", exc)
         return empty
 
     amounts: dict[str, int] = {}
@@ -604,7 +693,7 @@ def load_reference_data(path: str) -> dict:
     try:
         ws = wb.active
         if ws is None:
-            log.warning("Reference amounts: no active worksheet in %s", p.name)
+            log.warning("Reference amounts: no active worksheet found")
             return empty
 
         header_skipped = False
@@ -629,8 +718,8 @@ def load_reference_data(path: str) -> dict:
                 row_count += 1
                 if row_count > _MAX_REFERENCE_ROWS:
                     log.warning(
-                        "Reference amounts: %s exceeds the %d-row limit — stopping early",
-                        p.name, _MAX_REFERENCE_ROWS,
+                        "Reference amounts: file exceeds the %d-row limit — stopping early",
+                        _MAX_REFERENCE_ROWS,
                     )
                     break
 
@@ -690,7 +779,7 @@ def load_reference_data(path: str) -> dict:
                 continue
 
     except Exception as exc:
-        log.warning("Reference amounts: unexpected error reading %s — %s", p.name, exc)
+        log.warning("Reference amounts: unexpected error reading file — %s", exc)
         return empty
 
     finally:
@@ -702,9 +791,9 @@ def load_reference_data(path: str) -> dict:
     return {"amounts": amounts, "combinations": combinations, "order": order}
 
 
-def load_reference_amounts(path: str) -> dict[str, int]:
+def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
     """
-    Loads section → required-amount mapping from a reference xlsx file.
+    Loads section → required-amount mapping from a reference xlsx.
 
     Backward-compatible wrapper around load_reference_data — returns only the
     amounts dict.  Use load_reference_data() when combination and ordering
@@ -712,4 +801,4 @@ def load_reference_amounts(path: str) -> dict[str, int]:
 
     Returns {} on ANY error — never raises.
     """
-    return load_reference_data(path)["amounts"]
+    return load_reference_data(source)["amounts"]

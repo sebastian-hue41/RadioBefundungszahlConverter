@@ -6,6 +6,7 @@
 *.xlsb
 *.txt
 !requirements.txt
+!requirements-web.txt
 
 # Output directory
 output/

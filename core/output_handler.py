@@ -1,10 +1,15 @@
 """
-output_handler.py — creates and saves the output xlsx file.
+output_handler.py — xlsx generation from a processing result dict.
 
-Designed to be server-compatible: accepts result dict + output directory,
-returns the saved file path. No interactive prompts.
+Two public entry points:
+  build_xlsx_bytes(result) -> (filename, bytes)
+      Builds the workbook entirely in memory. Used by the iii web worker —
+      no files are ever written to disk on the server.
+  save_output(result, output_dir) -> str
+      Builds the workbook and saves it to disk. Used by the CLI.
 """
 
+import io
 import re
 from datetime import datetime
 from pathlib import Path
@@ -151,32 +156,22 @@ def _set_column_widths(ws, n_years: int, gesamt_col: int, has_reference: bool) -
         ws.column_dimensions[get_column_letter(gesamt_col + 1)].width = 13  # Benötigt
 
 
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Workbook builder ──────────────────────────────────────────────────────────
 
-def save_output(
+def _build_workbook(
     result: dict,
-    output_dir: str = ".",
     reference_amounts: "dict[str, int] | None" = None,
     reference_data: "dict | None" = None,
-) -> str:
+) -> "tuple[str, openpyxl.Workbook]":
     """
-    Creates an xlsx file from the processing result and saves it to `output_dir`.
+    Build an openpyxl Workbook from a processing result dict.
+    Returns (filename, workbook) — no I/O performed.
 
     Pass `reference_data` (from load_reference_data) to enable combination rows
     and reference-file ordering.  `reference_amounts` is kept for backward
     compatibility when only the amounts dict is available.
-
-    Returns the absolute path of the saved file.
-    Raises IOError if the file cannot be written.
     """
     filename = _make_filename(result.get("mitarbeiter"), result.get("befunddatum"))
-
-    try:
-        out_dir = Path(output_dir).resolve()
-        out_dir.mkdir(parents=True, exist_ok=True)
-        output_path = out_dir / filename
-    except Exception as exc:
-        raise IOError(f"Cannot prepare output directory '{output_dir}': {exc}") from exc
 
     years:             list[int]       = result["years"]
     data:              dict[str, dict] = result["data"]
@@ -194,9 +189,9 @@ def save_output(
 
     # reference_data takes precedence over the legacy reference_amounts param.
     if reference_data:
-        _ref:          dict[str, int]   = reference_data.get("amounts", {})
-        _combinations: dict[str, list]  = reference_data.get("combinations", {})
-        _ref_order:    list[str]        = reference_data.get("order", [])
+        _ref:          dict[str, int]  = reference_data.get("amounts", {})
+        _combinations: dict[str, list] = reference_data.get("combinations", {})
+        _ref_order:    list[str]       = reference_data.get("order", [])
     else:
         _ref          = reference_amounts or {}
         _combinations = {}
@@ -444,6 +439,61 @@ def save_output(
                 start_row=next_row, start_column=1,
                 end_row=next_row, end_column=len(col_headers),
             )
+
+    return filename, wb
+
+
+# ── Public entry points ───────────────────────────────────────────────────────
+
+def build_xlsx_bytes(
+    result: dict,
+    reference_amounts: "dict[str, int] | None" = None,
+    reference_data: "dict | None" = None,
+) -> "tuple[str, bytes]":
+    """
+    Build the xlsx entirely in memory and return (filename, raw_bytes).
+
+    No files are written to disk — intended for the iii web worker where
+    the bytes are streamed directly back to the HTTP client.
+
+    Pass `reference_data` (from load_reference_data) to enable combination rows
+    and reference-file ordering.  `reference_amounts` is kept for backward
+    compatibility when only the amounts dict is available.
+    """
+    filename, wb = _build_workbook(
+        result, reference_amounts=reference_amounts, reference_data=reference_data
+    )
+    buf = io.BytesIO()
+    wb.save(buf)
+    return filename, buf.getvalue()
+
+
+def save_output(
+    result: dict,
+    output_dir: str = ".",
+    reference_amounts: "dict[str, int] | None" = None,
+    reference_data: "dict | None" = None,
+) -> str:
+    """
+    Build the xlsx and save it to `output_dir` on disk.
+
+    Pass `reference_data` (from load_reference_data) to enable combination rows
+    and reference-file ordering.  `reference_amounts` is kept for backward
+    compatibility when only the amounts dict is available.
+
+    Returns the absolute path of the saved file.
+    Raises IOError if the directory cannot be created or the file cannot be written.
+    """
+    filename, wb = _build_workbook(
+        result, reference_amounts=reference_amounts, reference_data=reference_data
+    )
+
+    try:
+        out_dir = Path(output_dir).resolve()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        output_path = out_dir / filename
+    except Exception as exc:
+        raise IOError(f"Cannot prepare output directory '{output_dir}': {exc}") from exc
 
     try:
         wb.save(output_path)

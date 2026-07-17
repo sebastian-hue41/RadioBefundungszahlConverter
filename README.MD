@@ -1,18 +1,40 @@
 # RadioBefundungszahlConverter
 
-A CLI tool that generates a **Facharzt-Auswertung** xlsx report for Radiology by cross-referencing a per-physician examination statistics file against a procedure-to-section mapping file, with optional colour-coded target comparison.
+Generates a **Facharzt-Auswertung** xlsx report for Radiology by cross-referencing a per-physician examination statistics file against a procedure-to-section mapping file, with optional colour-coded target comparison.
+
+Available as a **CLI tool** (master branch) and as an **iii web worker** (this branch).
+
+---
+
+## Table of contents
+
+1. [What it does](#what-it-does)
+2. [How it works](#how-it-works)
+3. [Package structure](#package-structure)
+4. [CLI usage](#cli-usage)
+5. [Web integration (iii)](#web-integration-iii)
+   - [What is iii?](#what-is-iii)
+   - [Prerequisites](#prerequisites-web)
+   - [Running the worker](#running-the-worker)
+   - [HTTP API](#http-api)
+   - [Calling the API](#calling-the-api)
+6. [Input file requirements](#input-file-requirements)
+7. [Server side file requirements](#server-side-file-requirements)
+8. [Reference amounts and colour coding](#reference-amounts-and-colour-coding)
+9. [Error handling](#error-handling)
+10. [Security](#security)
 
 ---
 
 ## What it does
 
-Given one user-supplied input file and two confidential administrator-managed files:
+Given one user-supplied input file and two confidential server-side files:
 
 | File | Source | Content |
 |---|---|---|
-| `statistics.xlsx` | Provided by physician | Raw examination log exported from the RIS — one row per individual Leistung, grouped by patient visit (IND1/IND2 indices) |
-| `map.xlsx` | Administrator-managed | Lookup table mapping every procedure code (`Leist0`) to one or more radiology sections (e.g. MRT, CT Hals/Thorax, US gesamt) — confidential |
-| `reference_amount.xlsx` | Administrator-managed | Required examination counts per section — adds a colour-coded **Benötigt** column to the output — confidential |
+| `statistics.xlsx` | Uploaded by user | Raw examination log exported from the RIS — one row per individual Leistung, grouped by patient visit (IND1/IND2 indices) |
+| `map.xlsx` | Server-side only | Lookup table mapping every procedure code (`Leist0`) to one or more radiology sections — confidential, never uploaded by clients |
+| `reference_amount.xlsx` | Server-side only | Required examination counts per section — adds a colour-coded **Benötigt** column to the output; confidential, never uploaded by clients |
 
 The tool produces a single output xlsx with:
 - **Rows** — radiology sections from the map (e.g. MRT, US gesamt, Mamma gesamt)
@@ -21,6 +43,8 @@ The tool produces a single output xlsx with:
 - **Colour coding** on the Gesamt cell showing how close the physician is to reaching the required amount
 - Procedures not found in the map are appended as extra rows so nothing is silently lost
 - A footer section notes any count discrepancies, merged map duplicates, and warnings
+
+The output xlsx is built **entirely in memory** — no files are written to disk on the server.
 
 ---
 
@@ -83,33 +107,33 @@ map.xlsx:  Leist-Kurz → {section: weight, …}
 
 ---
 
-## Architecture
+## Package structure
 
 ```
-main.py              CLI entry point (argparse)
-input_handler.py     File security validation + data loading (statistics, map, reference)
-logic.py             Pure processing: matching, aggregation, count verification
-output_handler.py    Styled xlsx generation
+core/
+  input_handler.py   Security validation + data loading (statistics, map, reference)
+  logic.py           Pure processing: matching, aggregation, count verification
+  output_handler.py  Styled xlsx generation (in-memory and disk variants)
+
+cli/
+  main.py            CLI entry point (argparse) — uses core/, writes to disk
+
+web/
+  worker.py          iii HTTP worker — uses core/, streams xlsx back to client
+
+requirements.txt      CLI dependencies (openpyxl)
+requirements-web.txt  Web worker dependencies (openpyxl + iii-sdk)
 ```
 
-The processing layer (`logic.py`) has no I/O and no side effects — it works purely on Python dicts.
+The `core/` layer has no I/O and no side effects. Both the CLI and the web worker call the same functions — the only difference is how files arrive (paths vs. in-memory bytes) and how the result leaves (saved to disk vs. streamed over HTTP).
 
 ---
 
-## Prerequisites
+## CLI usage
 
 ```bash
 pip install -r requirements.txt
-```
-
-Requires Python 3.10+ and `openpyxl`.
-
----
-
-## Usage
-
-```bash
-python main.py <statistics.xlsx> <map.xlsx> [options]
+python -m cli.main <statistics.xlsx> <map.xlsx> [options]
 ```
 
 ### Options
@@ -117,36 +141,137 @@ python main.py <statistics.xlsx> <map.xlsx> [options]
 | Flag | Default | Description |
 |---|---|---|
 | `--output DIR` | `.` (current directory) | Directory where the output file is saved |
-| `--include-underscore` | off | Include underscore-prefixed section columns from the map (`_CLIP`, `_TRENNER`, etc.) |
+| `--include-underscore` | off | Include `_`-prefixed section columns from the map |
 | `--reference FILE` | `reference_amount.xlsx` (auto-detected in CWD) | Path to the reference file with required amounts per section |
 
 ### Examples
 
 ```bash
-# Basic usage — auto-detects reference_amount.xlsx in the current directory
-python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx
+# Basic — auto-detects reference_amount.xlsx in the current directory
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx
 
-# Save output to a specific folder
-python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --output ./reports
+# Save to a specific folder
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --output ./reports
 
 # Specify a custom reference file
-python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --reference targets_2024.xlsx
-
-# Include internal map columns
-python main.py 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --include-underscore
+python -m cli.main 2024_Statistik_DR_EXAMPLE.xlsx mapped_leistungen.xlsx --reference targets_2024.xlsx
 ```
 
-### Output filename
+---
 
-The output file is named automatically from the statistics file metadata:
+## Web integration (iii)
+
+### What is iii?
+
+[iii](https://github.com/iii-hq) is a lightweight backend infrastructure platform. You register Python functions as **workers** that connect to a central **iii engine** over WebSocket. The engine exposes the workers as HTTP endpoints and handles routing, load-balancing, and streaming — the worker code never opens a port itself.
 
 ```
-{Mitarbeiter}{Befunddatum}Auswertung.xlsx
+Browser / API client
+        │  POST /convert (multipart)
+        ▼
+  iii engine  ──WebSocket──►  web/worker.py
+        │                          │
+        │◄──── xlsx bytes ─────────┘
+        ▼
+  HTTP response (application/vnd.openxmlformats...)
 ```
 
-Example: `DR_EXAMPLE01042019-31122022Auswertung.xlsx`
+The worker receives the raw HTTP request (headers + body) as structured objects and writes the response back through the same WebSocket connection. The engine handles TLS, keep-alive, and buffering.
 
-If the metadata cannot be read, a timestamped generic name is used and a note is added to the output file.
+### Prerequisites (web)
+
+```bash
+pip install -r requirements-web.txt
+```
+
+You also need a running iii engine. Follow the [iii setup guide](https://github.com/iii-hq) to start one, or point `III_ENGINE_URL` at an existing instance.
+
+### Running the worker
+
+```bash
+# From the project root:
+python -m web.worker
+```
+
+Environment variables:
+
+| Variable | Default | Description |
+|---|---|---|
+| `III_ENGINE_URL` | `ws://localhost:49134` | WebSocket URL of the iii engine |
+| `WORKER_NAME` | `befundungszahl-converter` | Display name shown in the iii console |
+| `MAP_FILE` | `map.xlsx` | Path to the server-side map file |
+| `REFERENCE_FILE` | `reference_amount.xlsx` | Path to the server-side reference amounts file |
+| `INCLUDE_UNDERSCORE_COLUMNS` | `false` | Set to `true` to include `_`-prefixed section columns from the map |
+
+The worker registers itself with the engine on startup and logs a ready message:
+
+```
+INFO web.worker: Connecting to iii engine at ws://localhost:49134 ...
+INFO web.worker: Worker 'befundungszahl-converter' ready — POST /convert
+```
+
+Once the worker is registered, the engine exposes the endpoint at:
+
+```
+POST http://<engine-host>/convert
+```
+
+### HTTP API
+
+#### `POST /convert`
+
+Upload the statistics file as `multipart/form-data`. The map is loaded server-side — clients never supply it. The server processes everything in memory and returns the output xlsx as a binary download — nothing is written to disk.
+
+**Request fields:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `statistics` | file (`.xlsx`) | Yes | MitarbeiterStatistik export from the RIS |
+
+**Responses:**
+
+| Status | Content-Type | Description |
+|---|---|---|
+| `200` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` | Output xlsx file as a binary stream |
+| `400` | `application/json` | Bad request — missing required field or wrong content type |
+| `413` | `application/json` | Upload too large (> 50 MB for the statistics file, > 60 MB total body) |
+| `422` | `application/json` | Validation failure — file is malformed, malicious, or structurally invalid |
+| `500` | `application/json` | Unexpected server error |
+| `503` | `application/json` | Processing timed out (> 60 s) |
+
+All responses include `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`.
+
+Error responses have the shape:
+```json
+{ "error": "human-readable description" }
+```
+
+### Calling the API
+
+#### curl
+
+```bash
+curl -X POST http://localhost:<engine-port>/convert \
+  -F "statistics=@2024_Statistik_DR_EXAMPLE.xlsx" \
+  --output Auswertung.xlsx
+```
+
+#### Python (requests)
+
+```python
+import requests
+
+with open("2024_Statistik_DR_EXAMPLE.xlsx", "rb") as stats:
+    response = requests.post(
+        "http://localhost:<engine-port>/convert",
+        files={
+            "statistics": ("statistics.xlsx", stats, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        },
+    )
+    response.raise_for_status()
+    with open("Auswertung.xlsx", "wb") as out:
+        out.write(response.content)
+```
 
 ---
 
@@ -168,7 +293,7 @@ The tool counts total Leistungen using an IND2-based group-end algorithm: when t
 
 ## Server side file requirements
 
-These files are **confidential** and managed by the administrator. They must not be supplied by end users. The administrator provides their paths as CLI arguments or the tool auto-detects them.
+These files are **confidential** and reside on the server. Clients never upload or interact with them directly. Administrators configure their paths via environment variables.
 
 ### map.xlsx (Leistungen Map)
 
@@ -180,6 +305,8 @@ A mapping table. Expected structure:
 - **Columns F onwards** — section names; a cell value of `1` means the procedure belongs to that section
 
 Duplicate procedure codes are resolved automatically: if both entries have section assignments, values are merged by taking the maximum per column. A warning is written to the output noting which codes were affected.
+
+Configured via the `MAP_FILE` environment variable (default: `map.xlsx`).
 
 ### reference_amount.xlsx
 
@@ -196,13 +323,17 @@ Required examination counts per section. Controls the **Benötigt** column and c
 - **Column B** — required count (positive integer); rows with an empty Benötigt cell are tracked for ordering but receive no target
 - **Column C** — optional semicolon-separated list of component sections for a **combination row**: a virtual row that aggregates multiple map sections; the individual component sections are not removed from the output
 
-The file is auto-detected as `reference_amount.xlsx` in the current working directory; override with `--reference`. If the file is absent the **Benötigt** column and colour coding are omitted from the output entirely.
+Configured via the `REFERENCE_FILE` environment variable (default: `reference_amount.xlsx`). If the file is absent or unreadable, the Benötigt column and colour coding are omitted and processing continues normally.
 
 ---
 
 ## Reference amounts and colour coding
 
-When reference data is present, the **Gesamt** cell for each section is colour-coded using Excel **conditional formatting** — the colour updates live when you edit a Benötigt value directly in the output file, without needing to regenerate it.
+When reference data is present (loaded server-side from `reference_amount.xlsx`), the output includes a **Benötigt** column and conditional colour coding on the **Gesamt** cell. See [Server side file requirements](#server-side-file-requirements) for the file format.
+
+### Colour coding
+
+When reference data is present, the **Gesamt** cell for each section is colour-coded using Excel **conditional formatting** — the colour updates live when the user edits a Benötigt value directly in the output file, without needing to regenerate it.
 
 | Colour | Meaning |
 |---|---|
@@ -215,8 +346,6 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 
 ## Error handling
 
-The tool is designed to be robust by default:
-
 | Situation | Behaviour |
 |---|---|
 | H6 / H7 / L8 missing | Generic output filename + note in output file; processing continues |
@@ -228,23 +357,30 @@ The tool is designed to be robust by default:
 | Duplicate map entries, identical | Silently deduplicated |
 | Formula injection in cells | Fatal error — file rejected as potentially malicious |
 | VBA macros in file | Fatal error — file rejected |
-| File > 50 MB | Fatal error |
+| File > 50 MB | Fatal error (CLI) / 413 response (web) — applies to the statistics upload |
 | Rows with unparseable dates | Skipped with a per-row warning; noted in output |
 | Count mismatch (processed ≠ expected) | Non-fatal; noted in output footer |
-| `reference_amount.xlsx` not found | Benötigt column omitted; processing continues normally |
+| Reference file not found or unreadable | Benötigt column omitted; processing continues normally |
 | Reference file fails security check | Logged as warning; Benötigt column omitted |
 | Individual reference row unparseable | That row skipped; rest of reference data used |
 | Section has no reference entry | Gesamt cell uncoloured; Benötigt cell left blank |
+| Request body > 60 MB | 413 before file is read into memory |
+| Processing timeout (> 60 s) | 503 response; worker continues serving other requests |
 
 ---
 
 ## Security
 
-All input files are treated as potentially malicious:
+All user-uploaded files are treated as potentially malicious. Server-side files (map, reference) are validated on load with the same checks:
 
 - File extension is validated (`.xlsx` only)
 - The zip container is inspected — corrupt or disguised files are rejected
+- Zip path-traversal entries (e.g. `../../etc/passwd`) are rejected
+- Zip bombs are detected: per-entry compression ratio > 50:1 or total uncompressed size > 200 MB
 - VBA macro presence causes immediate rejection
-- File size is capped at 50 MB
+- File size is capped at 50 MB per file; the HTTP body is capped at 110 MB total
 - Every string cell value is checked for formula injection characters (`=`, `+`, `-`, `@`, `|`, …)
 - Reference amounts are bounds-checked (must be positive integers ≤ 1 000 000)
+- Map files are limited to 500 section columns to prevent memory exhaustion
+- All HTTP responses include `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`
+- Processing is time-limited to 60 seconds per request
