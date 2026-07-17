@@ -30,6 +30,10 @@ def process(stats_data: dict, map_data: dict) -> dict:
         total_expected  int | None        expected count from L8 (may be None)
         mitarbeiter     str | None
         befunddatum     str | None
+        unassigned      list[dict]        map entries hit by the statistics but
+                                          assigned to no section — each entry is
+                                          {leist_kurz, kurztext, count}, sorted
+                                          by count descending
     """
     errors: list[str] = list(stats_data.get("errors", []))
 
@@ -47,6 +51,10 @@ def process(stats_data: dict, map_data: dict) -> dict:
 
     years_seen: set[int] = set()
     unmatched: dict[str, str] = {}  # leist_kurz → display label (collected once per unique code)
+    # leist_kurz → occurrence count for map entries with no section assignment.
+    # These examinations would otherwise vanish silently: they are in the map
+    # (so not reported as unmatched) but contribute to no section.
+    unassigned_counts: dict[str, int] = {}
 
     for exam in examinations:
         leist_kurz: str = exam["leist_kurz"]
@@ -56,9 +64,13 @@ def process(stats_data: dict, map_data: dict) -> dict:
         if leist_kurz in map_leistungen:
             map_entry = map_leistungen[leist_kurz]
             # An examination can belong to multiple sections simultaneously.
+            assigned = False
             for section_name, val in map_entry["sections"].items():
                 if val >= 1:
                     raw_counts[section_name][year] += val
+                    assigned = True
+            if not assigned:
+                unassigned_counts[leist_kurz] = unassigned_counts.get(leist_kurz, 0) + 1
         else:
             # Not found in map — use Leistungsbezeichnung as the display key,
             # fall back to the code itself when the name is absent.
@@ -89,6 +101,25 @@ def process(stats_data: dict, map_data: dict) -> dict:
         year_counts["Total"] = sum(year_counts.values())
         data[display_label] = year_counts
 
+    # ── Unassigned map entries ─────────────────────────────────────────────────
+    # Sorted by volume so the biggest losses surface first.
+    unassigned: list[dict] = [
+        {
+            "leist_kurz": code,
+            "kurztext": map_leistungen[code].get("kurztext", ""),
+            "count": count,
+        }
+        for code, count in sorted(unassigned_counts.items(), key=lambda kv: -kv[1])
+    ]
+    if unassigned:
+        total_unassigned = sum(u["count"] for u in unassigned)
+        errors.append(
+            f"NICHT ZUGEORDNET: {total_unassigned:,} Leistungen "
+            f"({len(unassigned)} Codes) sind in der Map keinem Leistungsbereich "
+            "zugeordnet und wurden in keiner Bereichszeile gezählt. "
+            "Details am Ende der Ausgabedatei."
+        )
+
     # ── Count verification ─────────────────────────────────────────────────────
     # Compare processed rows against the IND2-derived expected total.
     # A mismatch means rows were dropped (missing LeistKurz, unparseable date, etc.).
@@ -113,4 +144,5 @@ def process(stats_data: dict, map_data: dict) -> dict:
         "mitarbeiter": stats_data.get("mitarbeiter"),
         "befunddatum": stats_data.get("befunddatum"),
         "merged_duplicates": map_data.get("merged_duplicates", []),
+        "unassigned": unassigned,
     }
