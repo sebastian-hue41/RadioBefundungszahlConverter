@@ -20,19 +20,28 @@ from the statistics beyond that); it deletes it right away.
 
 from __future__ import annotations
 
+import hmac
+import json
 import re
+import secrets
+import socketserver
 import sys
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qsl
+from urllib.parse import parse_qsl, quote
 
 from core.input_handler import MAX_FILE_SIZE_MB, load_map, load_statistics
 from core.logic import process
 from core.output_handler import OutputValidationError, build_xlsx_bytes
 
+from . import __version__
 from .errors import (
     ALLRAD,
+    CATALOG,
+    HINTS,
     MAP_SLOTS,
     NRAD,
     SELECTION_NOTE_PREFIX,
@@ -274,3 +283,285 @@ def split_upload(body: bytes, query: "str | Mapping[str, str]") -> tuple[dict[st
         if raw_name:
             names[slot] = safe_name(raw_name[:_MAX_RAW_NAME])
     return files, names
+
+
+# ── The HTTP server ────────────────────────────────────────────────────────────
+#
+# All routes sit under a random per-launch prefix: /<token>/
+#
+#   GET  /<token>/           the page
+#   POST /<token>/evaluate   the upload (see split_upload); JSON summary or error
+#   GET  /<token>/download   the latest Excel
+#   POST /<token>/reset      forget the latest result
+#   POST /<token>/shutdown   forget the result, answer, stop the server
+#
+# Anything else is a 404. The server listens on 127.0.0.1 only. Other web pages the
+# user has open cannot use it: the prefix is secret, the Host header must be our own
+# address (DNS rebinding) and a foreign Origin is refused.
+
+_LENGTH = re.compile(r"[0-9]{1,12}")
+_PAGE_PLACEHOLDER = "{{NONCE}}"
+_CATALOG_PLACEHOLDER = "{{CATALOG}}"
+_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_STATUS = {"E301": 400, "E302": 400, "E304": 400, "E305": 413, "E307": 409, "E901": 404, "E999": 500}
+_DEFAULT_ERROR_STATUS = 422
+
+# Sent with every response.
+_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("Cache-Control", "no-store"),
+    ("Referrer-Policy", "no-referrer"),
+    ("X-Frame-Options", "DENY"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+)
+# The page may run its own script and style (marked with the nonce) and talk to this
+# server; nothing else: no external script, style, image or connection, no framing.
+_PAGE_POLICY = (
+    "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; connect-src 'self'; "
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+_DATA_POLICY = "default-src 'none'; frame-ancestors 'none'"
+
+
+def catalog_json() -> str:
+    """
+    Everything the page needs to word its own errors and hints, as JSON that is safe inside a
+    <script> element: the characters < > & are written as \\uXXXX, so no text of the catalog
+    can close the element or open another one.
+    """
+    data = {
+        "errors": {code: {"title": entry.title, "hint": entry.hint} for code, entry in CATALOG.items()},
+        "hints": {code: list(texts) for code, texts in HINTS.items()},
+        "slots": dict(SLOT_LABELS),
+        "limits": {"file_bytes": MAX_FILE_SIZE_MB * 1024 * 1024, "body_bytes": MAX_BODY_BYTES},
+        "version": __version__,
+    }
+    text = json.dumps(data, ensure_ascii=True, separators=(",", ":"))
+    return text.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def _load_page() -> str:
+    return (bundle_dir() / "local_app" / "static" / "index.html").read_text(encoding="utf-8")
+
+
+class _State:
+    """What the server remembers: the latest result (one slot) and whether it is shutting down."""
+
+    def __init__(self, reference_data: dict | None, page_html: str):
+        self.reference_data = reference_data
+        self.page_html = page_html
+        self.busy = threading.Lock()          # held while an evaluation runs; a second one is refused at once
+        self._lock = threading.Lock()         # protects the result slot
+        self._result: Evaluation | None = None
+        self._closed = False
+
+    def set_result(self, evaluation: Evaluation | None) -> None:
+        with self._lock:
+            if not self._closed:              # a result that finishes after shutdown is dropped
+                self._result = evaluation
+
+    def get_result(self) -> Evaluation | None:
+        with self._lock:
+            return self._result
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._result = None
+
+
+class AppServer(ThreadingHTTPServer):
+    """The local app's server. `url` is the address to open; `token` is its secret prefix."""
+
+    daemon_threads = True                     # a stuck evaluation must not keep the program alive
+    allow_reuse_address = False               # on Windows this would let another program share the port
+
+    def __init__(self, port: int, state: _State):
+        self.state = state
+        self.token = secrets.token_urlsafe(24)
+        super().__init__(("127.0.0.1", port), _Handler)
+        self.port = self.server_address[1]
+        self.allowed_hosts = {f"127.0.0.1:{self.port}", f"localhost:{self.port}"}
+        self.allowed_origins = {f"http://{host}" for host in self.allowed_hosts}
+        self.url = f"http://127.0.0.1:{self.port}/{self.token}/"
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)   # HTTPServer's own bind looks up the host name, which can be slow
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+    def handle_error(self, request, client_address) -> None:
+        pass                                  # nothing is printed: a windowless build has no stderr
+
+    def shutdown_soon(self) -> None:
+        """Stop serving and close the port, from a thread of its own (shutdown() waits for the serve loop)."""
+        def stop():
+            self.shutdown()
+            self.server_close()
+        threading.Thread(target=stop, daemon=True).start()
+
+
+def create_server(reference_data: dict | None = None, port: int = 0, page_html: str | None = None) -> AppServer:
+    """
+    The server for one run of the app, listening on 127.0.0.1 (port 0: a free one).
+    Call serve_forever() on it; open `url`. `page_html` replaces the bundled page (tests).
+    """
+    html = _load_page() if page_html is None else page_html
+    if _PAGE_PLACEHOLDER not in html:
+        raise ValueError(f"the page has no {_PAGE_PLACEHOLDER} for the nonce of its script and style")
+    return AppServer(port, _State(reference_data, html))
+
+
+class _Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.0"             # one request per connection: no keep-alive, nothing left unread
+    timeout = 60                              # seconds a client may stall before the connection is dropped
+    server_version = "local"
+    sys_version = ""
+
+    # ── Quiet ──────────────────────────────────────────────────────────────
+    def log_message(self, format, *args):     # noqa: A002 (name fixed by the base class)
+        pass
+
+    def version_string(self) -> str:
+        return "local"
+
+    # ── Answers ────────────────────────────────────────────────────────────
+    def _send(self, status: int, body: bytes = b"", content_type: str = "text/plain; charset=utf-8",
+              policy: str = _DATA_POLICY, extra: tuple = ()) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Security-Policy", policy)
+        for name, value in (*_SECURITY_HEADERS, *extra):
+            self.send_header(name, value)
+        self.end_headers()
+        if body:
+            self.wfile.write(body)
+
+    def _json(self, status: int, payload: dict) -> None:
+        self._send(status, json.dumps(payload, ensure_ascii=True).encode("ascii"), "application/json")
+
+    def _app_error(self, error: AppError) -> None:
+        self._json(_STATUS.get(error.code, _DEFAULT_ERROR_STATUS), {"ok": False, "error": error.to_dict()})
+
+    def send_error(self, code, message=None, explain=None):
+        # Errors found while parsing the request line or the headers (too long, malformed, ...).
+        error = AppError("E304", detail=f"Die Anfrage war ungültig (HTTP {code}).")
+        self._json(code, {"ok": False, "error": error.to_dict()})
+
+    # ── Which requests are accepted ────────────────────────────────────────
+    def _own_origin(self) -> bool:
+        server = self.server
+        if (self.headers.get("Host") or "").lower() not in server.allowed_hosts:
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.lower() not in server.allowed_origins:
+            return False                      # also "null" and every other site
+        site = self.headers.get("Sec-Fetch-Site")
+        return site is None or site in ("same-origin", "none")
+
+    def _route(self) -> tuple[str, str] | None:
+        """(route, query) when the path is /<token>/<route>; None for anything else."""
+        target = self.path.split("#", 1)[0]
+        path, _, query = target.partition("?")
+        if not path.startswith("/"):
+            return None
+        segment, slash, rest = path[1:].partition("/")
+        if not slash or not hmac.compare_digest(segment.encode("utf-8", "replace"), self.server.token.encode("ascii")):
+            return None
+        return "/" + rest, query
+
+    _ROUTES = {
+        "/": {"GET": "_page"},
+        "/download": {"GET": "_download"},
+        "/evaluate": {"POST": "_evaluate"},
+        "/reset": {"POST": "_reset"},
+        "/shutdown": {"POST": "_shutdown"},
+    }
+
+    def _dispatch(self) -> None:
+        try:
+            if not self._own_origin():
+                return self._send(403)
+            found = self._route()
+            methods = self._ROUTES.get(found[0]) if found else None
+            if methods is None:
+                return self._send(404)
+            action = methods.get(self.command)
+            if action is None:
+                return self._send(405)
+            getattr(self, action)(found[1])
+        except OSError:
+            pass                              # the client went away or stalled; nobody is left to answer
+        except Exception as exc:              # a bug: the type and place, never the message
+            try:
+                self._app_error(unexpected_error(exc))
+            except OSError:
+                pass
+
+    do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _dispatch
+
+    # ── Routes ─────────────────────────────────────────────────────────────
+    def _page(self, query: str) -> None:
+        nonce = secrets.token_urlsafe(18)
+        html = self.server.state.page_html.replace(_CATALOG_PLACEHOLDER, catalog_json()).replace(_PAGE_PLACEHOLDER, nonce)
+        self._send(200, html.encode("utf-8"), "text/html; charset=utf-8", _PAGE_POLICY.format(nonce=nonce))
+
+    def _download(self, query: str) -> None:
+        evaluation = self.server.state.get_result()
+        if evaluation is None:
+            return self._app_error(AppError("E901"))
+        fallback = re.sub(r"[^A-Za-z0-9._() -]", "_", evaluation.filename)
+        disposition = f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(evaluation.filename, safe='')}"
+        self._send(200, evaluation.data, _XLSX, extra=(("Content-Disposition", disposition),))
+
+    def _reset(self, query: str) -> None:
+        self.server.state.set_result(None)
+        self._json(200, {"ok": True})
+
+    def _shutdown(self, query: str) -> None:
+        self.server.state.close()
+        self._json(200, {"ok": True})
+        self.wfile.flush()
+        self.server.shutdown_soon()
+
+    def _content_length(self) -> int:
+        if self.headers.get("Transfer-Encoding") is not None:
+            raise AppError("E304", detail="Die Anfrage darf nicht in Teilen gesendet werden.")
+        values = self.headers.get_all("Content-Length") or []
+        if len(values) != 1 or not _LENGTH.fullmatch(values[0].strip()):
+            raise AppError("E304", detail="Die Längenangabe der Anfrage fehlt oder ist ungültig.")
+        length = int(values[0])
+        if length > MAX_BODY_BYTES:
+            raise AppError("E305", detail=f"{length:,} Bytes angekündigt; erlaubt sind {MAX_BODY_BYTES:,}.")
+        return length
+
+    def _read_body(self, length: int) -> bytes:
+        try:
+            body = self.rfile.read(length)
+        except OSError as exc:                # a stalled or dropped connection
+            raise AppError("E304", detail="Die Verbindung wurde unterbrochen oder war zu langsam.") from exc
+        if len(body) != length:
+            raise AppError("E304", detail=f"Angekündigt: {length:,} Bytes, empfangen: {len(body):,}.")
+        return body
+
+    def _evaluate(self, query: str) -> None:
+        state = self.server.state
+        if not state.busy.acquire(blocking=False):
+            return self._app_error(AppError("E307"))      # answered at once, never queued
+        try:
+            state.set_result(None)            # whatever happens now, no older result stays behind
+            try:
+                body = self._read_body(self._content_length())
+                files, names = split_upload(body, query)
+                del body                      # the slices are copies; the uploads are dropped after this call
+                evaluation = evaluate(files, names, state.reference_data)
+                files = names = None
+            except AppError as error:
+                return self._app_error(error)
+            except Exception as exc:
+                return self._app_error(unexpected_error(exc))
+            state.set_result(evaluation)
+            self._json(200, {"ok": True, "summary": evaluation.summary})
+        finally:
+            state.busy.release()

@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Befundungszahlen auswerten</title>
+<style nonce="{{NONCE}}">
+  :root {
+    --bg: #f4f6f9; --card: #ffffff; --text: #1b2230; --muted: #596273; --line: #cfd5df;
+    --accent: #2457d6; --accent-text: #ffffff; --accent-soft: #e9effc;
+    --error: #a8231b; --error-bg: #fdeceb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11141a; --card: #1a1f29; --text: #e8ebf1; --muted: #a0a9ba; --line: #394253;
+      --accent: #7aa2f7; --accent-text: #0c1220; --accent-soft: #232d46;
+      --error: #ff9a91; --error-bg: #3b2321;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { background: var(--bg); color: var(--text); }
+  body {
+    margin: 0; padding: 1.5rem 1rem;
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  .card {
+    max-width: 38rem; margin: 0 auto; padding: 1.75rem;
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  }
+  h1 { margin: 0 0 1.25rem; font-size: 1.5rem; line-height: 1.25; }
+  h2, legend { margin: 0 0 .6rem; padding: 0; font-size: 1.05rem; font-weight: 600; }
+  fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
+  .step { margin: 0 0 1.5rem; }
+  .num {
+    display: inline-block; width: 1.5rem; height: 1.5rem; margin-right: .5rem;
+    border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+    text-align: center; font-size: .9rem; line-height: 1.5rem; font-weight: 700;
+  }
+  .muted { color: var(--muted); }
+
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+  }
+  .field { margin: 0 0 .75rem; }
+  .field-name { display: block; margin: 0 0 .25rem; font-size: .9rem; font-weight: 600; color: var(--muted); }
+  .drop {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .15rem;
+    min-height: 4.5rem; padding: .9rem 1rem; text-align: center; cursor: pointer;
+    border: 2px dashed var(--line); border-radius: 10px;
+  }
+  .drop:hover, .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .drop:focus-within { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .drop.has-file { border-style: solid; border-color: var(--accent); background: var(--accent-soft); }
+  .field.invalid .drop { border-color: var(--error); background: var(--error-bg); }
+  .drop-main { font-weight: 600; overflow-wrap: anywhere; }
+  .drop-sub { font-size: .875rem; color: var(--muted); }
+  .check { color: var(--accent); }
+
+  .choices { display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; }
+  .choices label { display: inline-flex; align-items: center; gap: .5rem; cursor: pointer; }
+  .choices input { width: 1.15rem; height: 1.15rem; accent-color: var(--accent); }
+  .step.invalid legend { color: var(--error); }
+
+  .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem; }
+  .status { margin: 0; color: var(--muted); }
+  button { font: inherit; }
+  .primary {
+    padding: .65rem 1.4rem; border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--accent); color: var(--accent-text); font-weight: 600;
+  }
+  .primary:disabled { opacity: .45; cursor: not-allowed; }
+  .primary:focus-visible, .link:focus-visible, .quiet:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .link, .quiet { padding: .25rem 0; border: 0; background: none; color: var(--accent); cursor: pointer; text-decoration: underline; }
+  .quiet { color: var(--muted); font-size: .9rem; }
+  .small { padding: .35rem .8rem; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); cursor: pointer; }
+
+  .error {
+    margin: 0 0 1.25rem; padding: .9rem 1rem; border-left: 4px solid var(--error);
+    border-radius: 6px; background: var(--error-bg);
+  }
+  .error:focus { outline: 3px solid var(--error); outline-offset: 2px; }
+  .error p { margin: 0 0 .35rem; }
+  .error-title { font-weight: 700; color: var(--error); }
+  .error-code { font-size: .9rem; color: var(--muted); }
+  .error details { margin-top: .25rem; font-size: .9rem; }
+  .error summary { cursor: pointer; color: var(--muted); }
+  .error details p { margin-top: .35rem; overflow-wrap: anywhere; white-space: pre-wrap; }
+
+  .result-title { margin: 0 0 .25rem; font-size: 1.3rem; }
+  .result-title:focus { outline: none; }
+  .result p { margin: 0 0 .2rem; overflow-wrap: anywhere; }
+  .result .actions { margin: 1.25rem 0 1rem; }
+  .saved { margin: 0; color: var(--accent); font-weight: 600; }
+  .hints summary { cursor: pointer; color: var(--accent); }
+  .hints ul { margin: .5rem 0 0; padding-left: 1.2rem; }
+  .hints li { margin: 0 0 .3rem; overflow-wrap: anywhere; }
+  .code { font-variant-numeric: tabular-nums; font-weight: 600; margin-right: .35rem; }
+
+  footer {
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem 1rem;
+    margin-top: 1.75rem; padding-top: 1rem; border-top: 1px solid var(--line);
+  }
+  .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; font-size: .9rem; }
+  .version { font-size: .8rem; color: var(--muted); }
+  @media (max-width: 30rem) {
+    body { padding: 0; }
+    .card { border-radius: 0; border-width: 1px 0; padding: 1.25rem 1rem; }
+  }
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Befundungszahlen auswerten</h1>
+  <noscript><p class="error">Diese Seite braucht JavaScript. Bitte JavaScript im Browser einschalten.</p></noscript>
+
+  <div id="error" class="error" role="alert" tabindex="-1" data-slot="" hidden>
+    <p class="error-title" id="error-title"></p>
+    <p id="error-hint"></p>
+    <p class="error-code">Fehlercode <strong id="error-code"></strong></p>
+    <details id="error-details" hidden>
+      <summary>Technische Details</summary>
+      <p id="error-detail"></p>
+    </details>
+  </div>
+
+  <section id="view-form">
+    <form id="form" novalidate>
+      <div class="step">
+        <h2 id="h-statistics"><span class="num" aria-hidden="true">1</span>Mitarbeiterstatistik</h2>
+        <div class="field" id="field-statistics" data-slot="statistics">
+          <label class="drop" id="drop-statistics" for="file-statistics">
+            <span class="drop-main" id="text-statistics">Datei wählen oder hierher ziehen</span>
+            <span class="drop-sub" id="sub-statistics"></span>
+            <input class="sr-only" type="file" id="file-statistics" accept=".xlsx" aria-labelledby="h-statistics text-statistics sub-statistics">
+          </label>
+        </div>
+      </div>
+
+      <fieldset class="step" id="step-departments">
+        <legend><span class="num" aria-hidden="true">2</span>Welche Bereiche?</legend>
+        <div class="choices">
+          <label for="use-allrad"><input type="checkbox" id="use-allrad" checked>Allrad</label>
+          <label for="use-nrad"><input type="checkbox" id="use-nrad" checked>NRAD</label>
+        </div>
+      </fieldset>
+
+      <div class="step" id="step-maps">
+        <h2><span class="num" aria-hidden="true">3</span>Leistungsmaps</h2>
+        <div class="field" id="field-allrad" data-slot="allrad">
+          <span class="field-name" id="h-allrad">Allrad-Map</span>
+          <label class="drop" id="drop-allrad" for="file-allrad">
+            <span class="drop-main" id="text-allrad">Datei wählen oder hierher ziehen</span>
+            <span class="drop-sub" id="sub-allrad"></span>
+            <input class="sr-only" type="file" id="file-allrad" accept=".xlsx" aria-labelledby="h-allrad text-allrad sub-allrad">
+          </label>
+        </div>
+        <div class="field" id="field-nrad" data-slot="nrad">
+          <span class="field-name" id="h-nrad">NRAD-Map</span>
+          <label class="drop" id="drop-nrad" for="file-nrad">
+            <span class="drop-main" id="text-nrad">Datei wählen oder hierher ziehen</span>
+            <span class="drop-sub" id="sub-nrad"></span>
+            <input class="sr-only" type="file" id="file-nrad" accept=".xlsx" aria-labelledby="h-nrad text-nrad sub-nrad">
+          </label>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="submit" id="submit" class="primary" disabled>Auswerten</button>
+        <p class="status" id="status" role="status" aria-live="polite"></p>
+      </div>
+    </form>
+  </section>
+
+  <section id="view-result" class="result" hidden>
+    <h2 class="result-title" id="result-title" tabindex="-1"><span class="check" aria-hidden="true">✓</span> Auswertung fertig</h2>
+    <p id="result-who"></p>
+    <p class="muted" id="result-what"></p>
+    <div class="actions">
+      <button type="button" id="download" class="primary">Excel herunterladen</button>
+      <button type="button" id="again" class="link">Weitere Statistik hochladen</button>
+    </div>
+    <p class="saved" id="saved" role="status" hidden>✓ Die Excel-Datei wurde gespeichert.</p>
+    <details class="hints" id="hints" hidden>
+      <summary id="hints-summary"></summary>
+      <ul id="hints-list"></ul>
+    </details>
+  </section>
+
+  <section id="view-closed" role="status" hidden>
+    <h2>Das Programm wurde beendet.</h2>
+    <p>Sie können dieses Fenster jetzt schließen.</p>
+  </section>
+
+  <footer id="footer">
+    <div>
+      <button type="button" id="quit" class="quiet">Server beenden</button>
+      <div class="confirm" id="confirm" role="alert" hidden>
+        <span>Das Ergebnis wurde noch nicht heruntergeladen. Trotzdem beenden?</span>
+        <button type="button" id="quit-yes" class="small">Ja, beenden</button>
+        <button type="button" id="quit-no" class="small">Abbrechen</button>
+      </div>
+    </div>
+    <span class="version" id="version"></span>
+  </footer>
+</main>
+
+<script type="application/json" id="catalog" nonce="{{NONCE}}">{{CATALOG}}</script>
+<script nonce="{{NONCE}}">
+(() => {
+  "use strict";
+
+  const catalog = JSON.parse(document.getElementById("catalog").textContent);
+  const $ = (id) => document.getElementById(id);
+  const MAPS = ["allrad", "nrad"];
+  const state = {
+    files: { statistics: null, allrad: null, nrad: null },
+    use: { allrad: true, nrad: true },
+    busy: false, closed: false, hasResult: false, downloaded: false, summary: null,
+  };
+
+  // ── Wording: everything comes from the catalog the server put into the page ──
+  const number = new Intl.NumberFormat("de-DE");
+  const oneDecimal = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+
+  function appError(code, slot, detail) {
+    const spec = catalog.errors[code] || { title: "Unerwarteter Fehler.", hint: "" };
+    return {
+      code, slot: slot || null, slot_label: slot ? catalog.slots[slot] : null,
+      title: spec.title.replace("{dept}", "Leistungen für die gewählten Bereiche"),
+      hint: spec.hint, detail: detail || "",
+    };
+  }
+
+  function fileSize(bytes) {
+    if (bytes < 1024) return number.format(bytes) + " Bytes";
+    if (bytes < 1024 * 1024) return oneDecimal.format(bytes / 1024) + " KB";
+    return oneDecimal.format(bytes / (1024 * 1024)) + " MB";
+  }
+
+  // ── The error box ─────────────────────────────────────────────────────────
+  function invalidTargets(error) {
+    if (error.slot) return [error.slot];
+    if (error.code === "E221") return MAPS;
+    return [];
+  }
+
+  function clearError() {
+    $("error").hidden = true;
+    for (const slot of ["statistics", ...MAPS]) {
+      $("field-" + slot).classList.remove("invalid");
+      $("file-" + slot).removeAttribute("aria-invalid");
+      $("file-" + slot).removeAttribute("aria-describedby");
+    }
+    $("step-departments").classList.remove("invalid");
+    $("error").dataset.slot = "";
+  }
+
+  function showError(error) {
+    if (state.closed) return;
+    clearError();
+    $("error-title").textContent = error.title;
+    $("error-hint").textContent = error.hint;
+    $("error-hint").hidden = !error.hint;
+    $("error-code").textContent = error.code;
+    $("error-detail").textContent = error.detail || "";
+    $("error-details").hidden = !error.detail;
+    $("error-details").open = false;
+    const targets = invalidTargets(error);
+    for (const slot of targets) {
+      $("field-" + slot).classList.add("invalid");
+      $("file-" + slot).setAttribute("aria-invalid", "true");
+      $("file-" + slot).setAttribute("aria-describedby", "error");
+    }
+    if (error.code === "E301" || error.code === "E303") $("step-departments").classList.add("invalid");
+    $("error").dataset.slot = targets.join(" ");
+    $("error").hidden = false;
+    $("error").focus();
+    $("error").scrollIntoView({ block: "nearest" });
+  }
+
+  // ── Showing the state ─────────────────────────────────────────────────────
+  function missing() {
+    const list = [];
+    if (!state.files.statistics) list.push(catalog.slots.statistics);
+    for (const slot of MAPS) if (state.use[slot] && !state.files[slot]) list.push(catalog.slots[slot]);
+    return list;
+  }
+
+  function renderFile(slot) {
+    const file = state.files[slot];
+    $("drop-" + slot).classList.toggle("has-file", Boolean(file));
+    $("text-" + slot).textContent = file ? "✓ " + file.name : "Datei wählen oder hierher ziehen";
+    $("sub-" + slot).textContent = file ? fileSize(file.size) + " · zum Ändern klicken oder eine andere Datei hierher ziehen" : "";
+  }
+
+  function render() {
+    for (const slot of ["statistics", ...MAPS]) renderFile(slot);
+    for (const slot of MAPS) $("field-" + slot).hidden = !state.use[slot];
+    $("step-maps").hidden = !(state.use.allrad || state.use.nrad);
+
+    const anyDepartment = state.use.allrad || state.use.nrad;
+    const lacking = missing();
+    let text;
+    if (state.busy) text = "Bitte kurz warten …";
+    else if (!anyDepartment) text = "Bitte mindestens einen Bereich ankreuzen.";
+    else if (lacking.length) text = "Es fehlt noch: " + lacking.join(", ");
+    else text = "Bereit zum Auswerten.";
+    $("status").textContent = text;
+
+    $("submit").disabled = state.busy || !anyDepartment || lacking.length > 0;
+    $("submit").textContent = state.busy ? "Wird ausgewertet …" : "Auswerten";
+    for (const id of ["file-statistics", "file-allrad", "file-nrad", "use-allrad", "use-nrad"]) $(id).disabled = state.busy;
+    $("form").setAttribute("aria-busy", String(state.busy));
+  }
+
+  function show(view) {
+    for (const id of ["view-form", "view-result", "view-closed"]) $(id).hidden = id !== view;
+    $("footer").hidden = view === "view-closed";
+  }
+
+  // ── Choosing files ────────────────────────────────────────────────────────
+  function setFile(slot, file) {
+    if (state.busy || state.closed) return;
+    state.files[slot] = file;
+    if (($("error").dataset.slot || "").split(" ").includes(slot)) clearError();
+    render();
+  }
+
+  function note(slot, text) {
+    $("sub-" + slot).textContent = text;
+  }
+
+  for (const slot of ["statistics", ...MAPS]) {
+    const input = $("file-" + slot);
+    const drop = $("drop-" + slot);
+    input.addEventListener("change", () => {
+      if (input.files && input.files[0]) setFile(slot, input.files[0]);
+      input.value = "";                    // the same file can be chosen again, e.g. after it was fixed
+    });
+    drop.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = state.busy ? "none" : "copy";
+      if (!state.busy) drop.classList.add("over");
+    });
+    drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+    drop.addEventListener("drop", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      drop.classList.remove("over");
+      if (state.busy || state.closed) return;
+      const dropped = event.dataTransfer ? event.dataTransfer.files : [];
+      if (dropped.length === 1) setFile(slot, dropped[0]);
+      else if (dropped.length > 1) note(slot, "Bitte nur eine Datei hierher ziehen.");
+    });
+  }
+
+  // A file dropped anywhere else must not make the browser open it and leave this page.
+  window.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    const inZone = event.target instanceof Element && event.target.closest(".drop");
+    if (event.dataTransfer && !inZone) event.dataTransfer.dropEffect = "none";
+  });
+  window.addEventListener("drop", (event) => event.preventDefault());
+
+  for (const slot of MAPS) {
+    $("use-" + slot).addEventListener("change", () => {
+      state.use[slot] = $("use-" + slot).checked;
+      if ($("step-departments").classList.contains("invalid")) clearError();
+      render();
+    });
+  }
+
+  // ── Sending ───────────────────────────────────────────────────────────────
+  async function readReply(response) {
+    try {
+      return JSON.parse(await response.text());
+    } catch (problem) {
+      return null;
+    }
+  }
+
+  function selectionProblem(slots) {
+    if (!state.use.allrad && !state.use.nrad) return appError("E301");
+    for (const slot of slots) {
+      if (!state.files[slot]) return appError("E302", slot);
+    }
+    for (const slot of slots) {
+      if (state.files[slot].size > catalog.limits.file_bytes) {
+        return appError(slot === "statistics" ? "E103" : "E203", slot);
+      }
+    }
+    const total = slots.reduce((sum, slot) => sum + state.files[slot].size, 0);
+    if (total > catalog.limits.body_bytes) return appError("E305");
+    return null;
+  }
+
+  async function evaluateFiles() {
+    if (state.busy || state.closed) return;
+    clearError();
+    const slots = ["statistics", ...MAPS.filter((slot) => state.use[slot])];
+    const problem = selectionProblem(slots);
+    if (problem) { showError(problem); return; }
+
+    state.busy = true;
+    render();
+    try {
+      const parts = [];
+      for (const slot of slots) {
+        try {
+          parts.push(await state.files[slot].arrayBuffer());
+        } catch (unreadable) {
+          showError(appError("E306", slot));       // changed since it was chosen, or only in the cloud
+          return;
+        }
+      }
+      const query = new URLSearchParams();
+      slots.forEach((slot, index) => {
+        query.set(slot === "statistics" ? "stats" : slot, String(parts[index].byteLength));
+        if (slot !== "statistics") query.set(slot + "_name", state.files[slot].name);
+      });
+      const response = await fetch("evaluate?" + query.toString(), { method: "POST", body: new Blob(parts) });
+      const reply = await readReply(response);
+      if (reply && reply.ok && reply.summary) showResult(reply.summary);
+      else if (reply && reply.error && reply.error.code) showError(reply.error);
+      else showError(appError("E902"));
+    } catch (lost) {
+      showError(appError("E902"));
+    } finally {
+      state.busy = false;
+      if (!state.closed) render();
+    }
+  }
+
+  $("form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    evaluateFiles();
+  });
+
+  // ── The result ────────────────────────────────────────────────────────────
+  function period(text) {
+    const match = /^(\d{2}\.\d{2}\.\d{4})-(\d{2}\.\d{2}\.\d{4})$/.exec(text || "");
+    return match ? match[1] + " – " + match[2] : text || "";
+  }
+
+  function showResult(summary) {
+    state.summary = summary;
+    state.hasResult = true;
+    state.downloaded = false;
+    clearError();
+    const who = [summary.mitarbeiter, period(summary.befunddatum)].filter(Boolean).join(" · ");
+    $("result-who").textContent = who || "Auswertung";
+    $("result-what").textContent = number.format(summary.total_counted) + " Leistungen · " + summary.selection_label;
+    $("saved").hidden = true;
+
+    const hints = summary.hints || [];
+    $("hints-list").replaceChildren();
+    for (const entry of hints) {
+      const item = document.createElement("li");
+      const code = document.createElement("span");
+      code.className = "code";
+      code.textContent = entry.code;
+      item.append(code, document.createTextNode(entry.text));
+      $("hints-list").append(item);
+    }
+    $("hints").hidden = hints.length === 0;
+    $("hints").open = false;
+    $("hints-summary").textContent = hints.length === 1 ? "1 Hinweis anzeigen" : hints.length + " Hinweise anzeigen";
+    show("view-result");
+    $("result-title").focus();
+  }
+
+  function saveAs(blob, name) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.className = "sr-only";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }
+
+  async function download() {
+    if (state.busy || !state.summary) return;
+    clearError();
+    $("saved").hidden = true;
+    state.busy = true;                       // not disabled: a keyboard user would lose the focus
+    try {
+      const response = await fetch("download");
+      if (!response.ok) {
+        const reply = await readReply(response);
+        showError(reply && reply.error && reply.error.code ? reply.error : appError("E902"));
+        return;
+      }
+      saveAs(await response.blob(), state.summary.filename);
+      state.downloaded = true;
+      $("confirm").hidden = true;
+      $("saved").hidden = false;
+    } catch (lost) {
+      showError(appError("E902"));
+    } finally {
+      state.busy = false;
+    }
+  }
+
+  function another() {
+    if (state.busy) return;
+    fetch("reset", { method: "POST" }).catch(() => {});
+    state.files.statistics = null;           // the maps stay: they are chosen once per start of the program
+    state.hasResult = false;
+    state.downloaded = false;
+    state.summary = null;
+    $("confirm").hidden = true;
+    clearError();
+    show("view-form");
+    render();
+    $("file-statistics").focus();
+  }
+
+  $("download").addEventListener("click", download);
+  $("again").addEventListener("click", another);
+
+  // ── Stopping the program ──────────────────────────────────────────────────
+  async function quit() {
+    $("confirm").hidden = true;
+    try {
+      await fetch("shutdown", { method: "POST" });
+    } catch (gone) {
+      // already stopped: nothing left to tell it
+    }
+    state.closed = true;
+    state.hasResult = false;
+    clearError();
+    document.title = "Beendet";
+    show("view-closed");
+  }
+
+  $("quit").addEventListener("click", () => {
+    if (state.hasResult && !state.downloaded) {
+      $("confirm").hidden = false;
+      $("quit-no").focus();
+    } else {
+      quit();
+    }
+  });
+  $("quit-yes").addEventListener("click", quit);
+  $("quit-no").addEventListener("click", () => {
+    $("confirm").hidden = true;
+    $("quit").focus();
+  });
+
+  $("version").textContent = "Version " + catalog.version;
+  show("view-form");
+  render();
+})();
+</script>
+</body>
+</html>

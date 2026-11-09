@@ -812,3 +812,687 @@ class TestRoundTrip:
         with pytest.raises(AppError) as info:
             split_upload(body[:-10], urlencode({"stats": len(direct[STATISTICS]), "allrad": len(direct[ALLRAD])}))
         assert info.value.code == "E304"
+
+
+# ── The HTTP server (a real one, on a free port, in a thread) ──────────────────
+
+import http.client  # noqa: E402
+import json  # noqa: E402
+import socket  # noqa: E402
+import threading  # noqa: E402
+
+from local_app.server import _Handler, create_server  # noqa: E402
+
+
+class Response:
+    def __init__(self, status, headers, body):
+        self.status, self.headers, self.body = status, headers, body
+
+    @property
+    def json(self):
+        return json.loads(self.body)
+
+    @property
+    def error(self):
+        return self.json["error"]
+
+
+def call(app, method, path, body=None, headers=None, host="own", length="auto", timeout=10):
+    """One request. host='own' sends our address, a string sends that, False sends none."""
+    conn = http.client.HTTPConnection("127.0.0.1", app.port, timeout=timeout)
+    try:
+        conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+        if host is not False:
+            conn.putheader("Host", f"127.0.0.1:{app.port}" if host == "own" else host)
+        for name, value in (headers or {}).items():
+            conn.putheader(name, value)
+        if length == "auto":
+            if body is not None:
+                conn.putheader("Content-Length", str(len(body)))
+        elif length is not None:
+            conn.putheader("Content-Length", str(length))
+        conn.endheaders()
+        if body:
+            conn.send(body)
+        response = conn.getresponse()
+        return Response(response.status, {k.lower(): v for k, v in response.getheaders()}, response.read())
+    finally:
+        conn.close()
+
+
+def at(app, route=""):
+    return f"/{app.token}/{route}"
+
+
+def post_files(app, files, names=None, **kwargs):
+    order = [(STATISTICS, "stats"), (ALLRAD, "allrad"), (NRAD, "nrad")]
+    body = b"".join(files[slot] for slot, _ in order if slot in files)
+    params = {param: len(files[slot]) for slot, param in order if slot in files}
+    for slot, name in (names or {}).items():
+        params[f"{slot}_name"] = name
+    return call(app, "POST", at(app, "evaluate") + "?" + urlencode(params), body, **kwargs)
+
+
+@pytest.fixture
+def app():
+    server_ = create_server(load_reference_data(REFERENCE))
+    thread = threading.Thread(target=server_.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+    thread.start()
+    server_.thread = thread
+    yield server_
+    server_.shutdown()
+    server_.server_close()
+    thread.join(5)
+
+
+SECURITY_HEADERS = {
+    "x-content-type-options": "nosniff", "cache-control": "no-store", "referrer-policy": "no-referrer",
+    "x-frame-options": "DENY", "cross-origin-resource-policy": "same-origin", "cross-origin-opener-policy": "same-origin",
+}
+
+
+def assert_secure_headers(response):
+    for name, value in SECURITY_HEADERS.items():
+        assert response.headers.get(name) == value, (name, response.headers)
+    policy = response.headers["content-security-policy"]
+    assert "default-src 'none'" in policy and "frame-ancestors 'none'" in policy
+    assert "python" not in response.headers.get("server", "").lower()
+
+
+class TestBinding:
+
+    def test_it_listens_on_127_0_0_1_only(self, app):
+        assert app.server_address[0] == "127.0.0.1" and app.port > 0
+        assert app.url == f"http://127.0.0.1:{app.port}/{app.token}/"
+
+    def test_the_token_is_long_random_and_new_for_every_server(self):
+        servers = [create_server() for _ in range(5)]
+        try:
+            tokens = {s.token for s in servers}
+            assert len(tokens) == 5 and all(len(t) >= 30 for t in tokens)
+            assert len({s.port for s in servers}) == 5
+        finally:
+            for s in servers:
+                s.server_close()
+
+    def test_the_port_cannot_be_shared(self, app):
+        assert app.allow_reuse_address is False
+        with pytest.raises(OSError):
+            create_server(port=app.port)
+
+    def test_a_stuck_request_cannot_keep_the_program_alive_and_a_stalled_client_is_dropped(self, app):
+        assert app.daemon_threads is True and 0 < _Handler.timeout <= 120
+
+    def test_a_page_without_the_nonce_placeholder_is_refused(self):
+        with pytest.raises(ValueError):
+            create_server(page_html="<html><script>alert(1)</script></html>")
+
+
+class TestWhatIsRefused:
+
+    def test_everything_works_with_our_own_address(self, app):
+        assert call(app, "GET", at(app)).status == 200
+
+    @pytest.mark.parametrize("path", ["/", "/evaluate", "/download", "/reset", "/shutdown", "/favicon.ico", "/index.html", "//", "/static/index.html"])
+    def test_without_the_token(self, app, path):
+        response = call(app, "GET", path)
+        assert response.status == 404 and response.body == b""
+        assert_secure_headers(response)
+
+    @pytest.mark.parametrize("mutate", [
+        lambda t: t[:-1] + ("a" if t[-1] != "a" else "b"), lambda t: t[:-1], lambda t: t + "x", lambda t: "", lambda t: t.upper(),
+        lambda t: t[1:], lambda t: "../" + t, lambda t: t + "/" + t, lambda t: "%" + t[1:],
+    ])
+    def test_with_a_wrong_token(self, app, mutate):
+        for method, route in (("GET", ""), ("GET", "download"), ("POST", "evaluate"), ("POST", "reset"), ("POST", "shutdown")):
+            response = call(app, method, f"/{mutate(app.token)}/{route}", b"x" if method == "POST" else None)
+            assert response.status == 404 and response.body == b""
+        assert call(app, "GET", at(app)).status == 200          # shutdown with a wrong token did nothing
+
+    def test_the_token_without_a_trailing_slash(self, app):
+        assert call(app, "GET", f"/{app.token}").status == 404
+
+    @pytest.mark.parametrize("route", ["x", "evaluate/", "Evaluate", "/", "../", "%65valuate", "download/x", "evaluate%00", "index.html", "static/index.html", "download?x=1/.."])
+    def test_unknown_routes_under_the_right_token(self, app, route):
+        response = call(app, "GET", at(app, route))
+        assert response.status == 404
+
+    def test_a_query_and_a_fragment_do_not_change_the_route(self, app):
+        assert call(app, "GET", at(app) + "?a=b").status == 200
+        assert call(app, "GET", at(app) + "#frag").status == 200
+
+    @pytest.mark.parametrize("method, route", [("GET", "evaluate"), ("GET", "reset"), ("GET", "shutdown"), ("POST", "download"), ("POST", ""),
+                                               ("PUT", "evaluate"), ("DELETE", "download"), ("PATCH", ""), ("HEAD", ""), ("HEAD", "download"),
+                                               ("OPTIONS", ""), ("OPTIONS", "evaluate")])
+    def test_the_wrong_method_for_a_route(self, app, method, route):
+        response = call(app, method, at(app, route), b"" if method in ("PUT", "PATCH") else None)
+        assert response.status == 405 and response.body == b""
+        assert call(app, "GET", at(app)).status == 200          # and nothing happened
+
+    def test_a_method_nobody_knows(self, app):
+        response = call(app, "FOO", at(app))
+        assert response.status == 501 and response.json["error"]["code"] == "E304"
+
+    @pytest.mark.parametrize("host", [
+        "evil.example", "127.0.0.1", "127.0.0.1:1", "localhost", "localhost.evil.example:{port}", "127.0.0.1:{port}.evil.example",
+        "evil.example:{port}", "[::1]:{port}", "0.0.0.0:{port}", "", "127.0.0.1:{port}, evil.example",
+    ])
+    def test_a_wrong_host_even_with_the_right_token(self, app, host):
+        response = call(app, "GET", at(app), host=host.format(port=app.port))
+        assert response.status == 403 and response.body == b""
+        assert_secure_headers(response)
+
+    def test_no_host_header_at_all(self, app):
+        assert call(app, "GET", at(app), host=False).status == 403
+
+    def test_a_wrong_host_for_every_route(self, app):
+        for method, route in (("GET", ""), ("GET", "download"), ("POST", "evaluate"), ("POST", "reset"), ("POST", "shutdown")):
+            assert call(app, method, at(app, route), b"x" if method == "POST" else None, host="evil.example").status == 403
+        assert call(app, "GET", at(app)).status == 200
+
+    @pytest.mark.parametrize("host", ["localhost:{port}", "LOCALHOST:{port}", "127.0.0.1:{port}"])
+    def test_the_accepted_spellings_of_our_own_address(self, app, host):
+        assert call(app, "GET", at(app), host=host.format(port=app.port)).status == 200
+
+    @pytest.mark.parametrize("origin", [
+        "http://evil.example", "null", "https://127.0.0.1:{port}", "http://127.0.0.1", "http://127.0.0.1:{other}", "http://localhost.evil.example:{port}",
+        "http://127.0.0.1:{port}.evil.example", "file://", "",
+    ])
+    def test_a_foreign_origin_on_every_route(self, app, origin):
+        origin = origin.format(port=app.port, other=app.port + 1)
+        for method, route in (("GET", ""), ("GET", "download"), ("POST", "evaluate"), ("POST", "reset"), ("POST", "shutdown")):
+            response = call(app, method, at(app, route), b"x" if method == "POST" else None, headers={"Origin": origin})
+            assert response.status == 403 and response.body == b"", (method, route)
+        assert call(app, "GET", at(app)).status == 200          # the foreign shutdown did nothing
+
+    @pytest.mark.parametrize("origin", ["http://127.0.0.1:{port}", "http://localhost:{port}", "HTTP://LOCALHOST:{port}"])
+    def test_our_own_origin_is_fine(self, app, origin):
+        assert call(app, "POST", at(app, "reset"), headers={"Origin": origin.format(port=app.port)}).status == 200
+
+    @pytest.mark.parametrize("site, allowed", [("cross-site", False), ("same-site", False), ("same-origin", True), ("none", True)])
+    def test_the_browser_says_where_the_request_comes_from(self, app, site, allowed):
+        response = call(app, "POST", at(app, "reset"), headers={"Sec-Fetch-Site": site})
+        assert (response.status == 200) is allowed and (allowed or response.status == 403)
+
+    def test_a_refused_request_changes_nothing(self, app):
+        assert post_files(app, make_files()).status == 200
+        for headers, host in (({"Origin": "http://evil.example"}, "own"), ({}, "evil.example")):
+            assert call(app, "POST", at(app, "reset"), headers=headers, host=host).status == 403
+        assert call(app, "GET", at(app, "download")).status == 200
+
+    def test_the_token_is_compared_in_constant_time(self, app, monkeypatch):
+        calls = []
+        real = server.hmac.compare_digest
+        monkeypatch.setattr(server.hmac, "compare_digest", lambda a, b: (calls.append((a, b)), real(a, b))[1])
+        call(app, "GET", at(app))
+        assert calls and calls[0][1] == app.token.encode()
+
+
+class TestSecurityHeaders:
+
+    def test_every_kind_of_response_has_them(self, app):
+        assert post_files(app, make_files()).status == 200
+        responses = [
+            call(app, "GET", at(app)), call(app, "GET", at(app, "download")), call(app, "POST", at(app, "reset")),
+            post_files(app, make_files()), post_files(app, {STATISTICS: b"x", ALLRAD: b"y"}), call(app, "GET", "/nope"),
+            call(app, "GET", at(app), host="evil.example"), call(app, "PUT", at(app)), call(app, "FOO", at(app)),
+            call(app, "POST", at(app, "evaluate"), length=None),
+        ]
+        assert {r.status for r in responses} >= {200, 404, 403, 405, 422, 400, 501}
+        for response in responses:
+            assert_secure_headers(response)
+
+    def test_the_server_does_not_name_itself(self, app):
+        assert "python" not in call(app, "GET", at(app)).headers["server"].lower()
+
+
+class TestPage:
+
+    def test_the_page_is_served_with_a_policy_that_names_its_nonce(self, app):
+        response = call(app, "GET", at(app))
+        assert response.status == 200 and response.headers["content-type"] == "text/html; charset=utf-8"
+        policy = response.headers["content-security-policy"]
+        nonce = re.search(r"script-src 'nonce-([^']+)'", policy).group(1)
+        assert f"style-src 'nonce-{nonce}'" in policy
+        assert f'<script nonce="{nonce}">' in response.body.decode() and f'<style nonce="{nonce}">' in response.body.decode()
+        assert "{{NONCE}}" not in response.body.decode()
+
+    def test_every_response_has_a_fresh_nonce(self, app):
+        nonces = {re.search(r"nonce-([^']+)", call(app, "GET", at(app)).headers["content-security-policy"]).group(1) for _ in range(5)}
+        assert len(nonces) == 5 and all(len(n) >= 20 for n in nonces)
+
+    def test_the_policy_allows_nothing_external_and_nothing_inline(self, app):
+        policy = call(app, "GET", at(app)).headers["content-security-policy"]
+        directives = dict(part.strip().split(" ", 1) for part in policy.split(";") if part.strip())
+        assert directives["default-src"] == "'none'" and directives["connect-src"] == "'self'"
+        assert directives["frame-ancestors"] == "'none'" and directives["base-uri"] == "'none'" and directives["form-action"] == "'none'"
+        for forbidden in ("unsafe-inline", "unsafe-eval", "*", "http:", "https:", "data:", "blob:"):
+            assert forbidden not in policy
+        assert set(directives) == {"default-src", "script-src", "style-src", "connect-src", "base-uri", "form-action", "frame-ancestors"}
+
+    def test_other_responses_have_the_strict_policy_without_a_nonce(self, app):
+        policy = call(app, "GET", at(app, "download")).headers["content-security-policy"]
+        assert policy == "default-src 'none'; frame-ancestors 'none'"
+
+    def test_a_page_given_by_the_caller_is_used(self):
+        s = create_server(page_html="<p nonce='{{NONCE}}'>eigene Seite</p>")
+        thread = threading.Thread(target=s.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        thread.start()
+        try:
+            assert b"eigene Seite" in call(s, "GET", at(s)).body
+        finally:
+            s.shutdown(); s.server_close(); thread.join(5)
+
+    def test_the_bundled_page_exists_and_carries_the_placeholder(self):
+        text = (bundle_dir() / "local_app" / "static" / "index.html").read_text(encoding="utf-8")
+        assert text.count("{{NONCE}}") >= 2 and "<html" in text
+
+
+import re  # noqa: E402
+
+
+class TestEvaluateAndDownload:
+
+    def test_the_summary_comes_back_as_json(self, app):
+        response = post_files(app, make_files(), {ALLRAD: "mapped_leistungen_2611.xlsx", NRAD: "mapped_leistungen_nrad.xlsx"})
+        assert response.status == 200 and response.headers["content-type"] == "application/json"
+        expected = evaluate(make_files(), {ALLRAD: "mapped_leistungen_2611.xlsx", NRAD: "mapped_leistungen_nrad.xlsx"},
+                            load_reference_data(REFERENCE)).summary
+        assert response.json == {"ok": True, "summary": expected}
+        assert response.json["summary"]["selection_label"] == "Allrad + NRAD"
+
+    def test_the_download_is_a_valid_excel_file_with_the_right_headers(self, app):
+        evaluation = post_files(app, make_files(nrad=False))
+        download = call(app, "GET", at(app, "download"))
+        assert download.status == 200 and download.headers["content-type"] == server._XLSX
+        assert download.headers["content-disposition"].startswith("attachment; ")
+        assert_secure_headers(download)
+        assert download.body[:2] == b"PK" and int(download.headers["content-length"]) == len(download.body)
+        ws = openpyxl.load_workbook(io.BytesIO(download.body)).active
+        assert ws.cell(row=1, column=1).value == "Leistungsbereich"
+        assert evaluation.json["summary"]["filename"] in download.headers["content-disposition"]
+
+    def test_a_staff_name_with_umlauts_downloads_with_a_correct_file_name(self, app):
+        post_files(app, make_files(mitarbeiter="Müller_Jürgen", befunddatum="01.01.2024-31.12.2024"))
+        download = call(app, "GET", at(app, "download"))
+        disposition = download.headers["content-disposition"]
+        assert "filename*=UTF-8''M%C3%BCller_J%C3%BCrgen01012024-31122024Auswertung_Allrad_NRAD.xlsx" in disposition
+        assert 'filename="M_ller_J_rgen01012024-31122024Auswertung_Allrad_NRAD.xlsx"' in disposition
+        disposition.encode("ascii")                                        # a header must be plain ASCII
+        assert openpyxl.load_workbook(io.BytesIO(download.body)).active.max_row > 1
+
+    def test_html_in_the_data_comes_back_as_inert_json_text(self, app):
+        evil = "<img src=x onerror=alert(1)>"
+        response = post_files(app, make_files(mitarbeiter=evil))
+        assert response.headers["content-type"] == "application/json" and response.headers["x-content-type-options"] == "nosniff"
+        assert response.json["summary"]["mitarbeiter"] == evil
+        assert response.body.decode("ascii")                               # plain ASCII JSON, nothing the browser could read as markup
+
+    def test_characters_beyond_ascii_are_escaped_in_the_json(self, app):
+        response = post_files(app, make_files(mitarbeiter="Müller_Jürgen ✓"))
+        body = response.body.decode("ascii")                                 # raises if anything non-ASCII is in the body
+        assert "\\u00fc" in body and response.json["summary"]["mitarbeiter"] == "Müller_Jürgen ✓"
+
+    def test_the_map_names_reach_the_sheet(self, app):
+        post_files(app, make_files(nrad=False), {ALLRAD: "Map Würzburg (neu).xlsx"})
+        ws = openpyxl.load_workbook(io.BytesIO(call(app, "GET", at(app, "download")).body)).active
+        assert any("„Map Würzburg (neu).xlsx“" in str(c.value) for row in ws.iter_rows() for c in row if c.value)
+
+    def test_the_reference_data_of_the_server_is_used(self, app):
+        post_files(app, make_files())
+        assert "Benötigt" in [c.value for c in openpyxl.load_workbook(io.BytesIO(call(app, "GET", at(app, "download")).body)).active[1]]
+
+    def test_without_reference_data_the_hint_says_so(self):
+        s = create_server()
+        thread = threading.Thread(target=s.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        thread.start()
+        try:
+            hints = [h["code"] for h in post_files(s, make_files()).json["summary"]["hints"]]
+            assert "W301" in hints
+        finally:
+            s.shutdown(); s.server_close(); thread.join(5)
+
+    def test_download_before_any_evaluation(self, app):
+        response = call(app, "GET", at(app, "download"))
+        assert response.status == 404 and response.error["code"] == "E901" and response.error["hint"]
+
+    def test_download_after_reset(self, app):
+        post_files(app, make_files())
+        assert call(app, "GET", at(app, "download")).status == 200
+        assert call(app, "POST", at(app, "reset")).json == {"ok": True}
+        assert call(app, "GET", at(app, "download")).error["code"] == "E901"
+
+    def test_a_second_evaluation_replaces_the_first(self, app):
+        post_files(app, make_files(nrad=False))
+        post_files(app, make_files(allrad=False))
+        disposition = call(app, "GET", at(app, "download")).headers["content-disposition"]
+        assert "_NRAD.xlsx" in disposition and "_Allrad" not in disposition
+
+    def test_a_failed_evaluation_leaves_no_old_result(self, app):
+        assert post_files(app, make_files()).status == 200
+        failed = post_files(app, {STATISTICS: b"not a workbook", ALLRAD: map_bytes(ALLRAD_CODES, sections=SECTIONS)})
+        assert failed.status == 422
+        assert call(app, "GET", at(app, "download")).error["code"] == "E901"
+
+    def test_a_request_that_is_refused_before_it_is_read_also_leaves_no_old_result(self, app):
+        post_files(app, make_files())
+        call(app, "POST", at(app, "evaluate"), length=None)
+        assert call(app, "GET", at(app, "download")).status == 404
+
+    @pytest.mark.parametrize("slot", [STATISTICS, ALLRAD, NRAD])
+    def test_a_validation_error_comes_back_with_everything_the_page_shows(self, app, slot):
+        files = make_files()
+        files[slot] = b"this is not a workbook"
+        response = post_files(app, files)
+        assert response.status == 422 and response.json["ok"] is False
+        error = response.error
+        assert set(error) == {"code", "title", "hint", "detail", "slot", "slot_label"}
+        assert error["code"] == series(slot) + "01" and error["slot"] == slot and error["slot_label"] == SLOT_LABELS[slot]
+        assert error["title"] and error["hint"]
+
+    @pytest.mark.parametrize("name", ["internal entity", "billion laughs", "zip bomb", "macros", "UTF-16 sheet"])
+    def test_the_attacks_are_refused_over_http_too(self, app, name):
+        make, suffix = HOSTILE[name]
+        files = make_files()
+        files[NRAD] = make(lambda: files[NRAD])
+        response = post_files(app, files)
+        assert response.status == 422 and response.error["code"] == "E2" + suffix and response.error["slot"] == NRAD
+
+    def test_selection_errors(self, app):
+        assert post_files(app, make_files(exams("RMRT"), allrad=False)).error["code"] == "E303"
+        assert post_files(app, {STATISTICS: make_files()[STATISTICS]}).error["code"] == "E302"
+        assert post_files(app, {ALLRAD: map_bytes(ALLRAD_CODES, sections=SECTIONS)}).error["slot"] == STATISTICS
+
+    def test_an_unexpected_error_gives_e999_with_only_type_and_place(self, app, monkeypatch):
+        def broken(*args, **kwargs):
+            raise RuntimeError("Mustermann, Maria, Befund 4711")
+        monkeypatch.setattr(server, "evaluate", broken)
+        response = post_files(app, make_files())
+        assert response.status == 500 and response.error["code"] == "E999"
+        assert "RuntimeError" in response.error["detail"] and "Mustermann" not in response.body.decode() and "4711" not in response.body.decode()
+
+    def test_a_bug_outside_evaluate_is_also_e999(self, app, monkeypatch):
+        monkeypatch.setattr(server, "split_upload", lambda *a, **k: 1 / 0)
+        response = post_files(app, make_files())
+        assert response.status == 500 and response.error["code"] == "E999" and "ZeroDivisionError" in response.error["detail"]
+
+    def test_a_bug_in_a_route_is_e999_and_the_server_goes_on(self, app, monkeypatch):
+        monkeypatch.setattr(app.state, "get_result", lambda: (_ for _ in ()).throw(KeyError("Mustermann")))
+        response = call(app, "GET", at(app, "download"))
+        assert response.status == 500 and response.error["code"] == "E999" and "Mustermann" not in response.body.decode()
+        monkeypatch.undo()
+        assert call(app, "GET", at(app)).status == 200
+
+    def test_the_server_keeps_no_upload(self, app):
+        post_files(app, make_files())
+        held = app.state.get_result()
+        assert isinstance(held, Evaluation) and set(vars(app.state)) == {"reference_data", "page_html", "busy", "_lock", "_result", "_closed"}
+        assert not any(isinstance(v, (bytes, bytearray)) and len(v) > 0 and v is not held.data for v in vars(held).values())
+
+
+class TestContentLength:
+
+    def test_a_missing_length(self, app):
+        response = call(app, "POST", at(app, "evaluate") + "?stats=1&allrad=1", length=None)
+        assert response.status == 400 and response.error["code"] == "E304"
+
+    @pytest.mark.parametrize("value", ["abc", "-5", "1e3", "5 5", "", "+5", "0x1F", "9" * 13, "5.0", "1,000", "NaN"])
+    def test_an_invalid_length_is_refused_without_reading_the_body(self, app, value):
+        # No body is sent. A server that tried to read one would wait here until the client's timeout.
+        response = call(app, "POST", at(app, "evaluate") + "?stats=1&allrad=1", length=value, timeout=3)
+        assert response.status == 400 and response.error["code"] == "E304"
+
+    def test_digits_of_other_scripts_are_not_a_length(self, app):
+        with socket.create_connection(("127.0.0.1", app.port), timeout=3) as sock:     # http.client cannot even send this
+            sock.sendall(f"POST /{app.token}/evaluate HTTP/1.0\r\nHost: 127.0.0.1:{app.port}\r\nContent-Length: ".encode() + "١٢".encode() + b"\r\n\r\n")
+            data = b""
+            while chunk := sock.recv(65536):                      # headers and body may arrive separately: read until the server closes
+                data += chunk
+        assert data.startswith(b"HTTP/1.0 400") and b'"E304"' in data
+
+    def test_a_client_that_sends_expect_100_continue_and_the_body_at_once_is_answered(self, app):
+        # The server answers as HTTP/1.0, which has no "100 Continue": such a client just sends its body.
+        files = make_files(nrad=False)
+        body = files[STATISTICS] + files[ALLRAD]
+        with socket.create_connection(("127.0.0.1", app.port), timeout=5) as sock:
+            sock.sendall(f"POST /{app.token}/evaluate?stats={len(files[STATISTICS])}&allrad={len(files[ALLRAD])} HTTP/1.1\r\n"
+                         f"Host: 127.0.0.1:{app.port}\r\nExpect: 100-continue\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+            data = b""
+            while chunk := sock.recv(65536):
+                data += chunk
+        assert data.startswith(b"HTTP/1.0 200") and b"100 Continue" not in data
+
+    def test_two_different_lengths(self, app):
+        conn = http.client.HTTPConnection("127.0.0.1", app.port, timeout=3)
+        conn.putrequest("POST", at(app, "evaluate"), skip_host=True)
+        for name, value in (("Host", f"127.0.0.1:{app.port}"), ("Content-Length", "5"), ("Content-Length", "6")):
+            conn.putheader(name, value)
+        conn.endheaders()
+        assert conn.getresponse().status == 400
+
+    def test_chunked_bodies_are_not_accepted(self, app):
+        response = call(app, "POST", at(app, "evaluate"), headers={"Transfer-Encoding": "chunked"}, length=None, timeout=3)
+        assert response.status == 400 and response.error["code"] == "E304"
+
+    def test_a_length_together_with_a_transfer_encoding_is_refused(self, app):
+        files = make_files(nrad=False)
+        body = files[STATISTICS] + files[ALLRAD]
+        query = f"?stats={len(files[STATISTICS])}&allrad={len(files[ALLRAD])}"
+        response = call(app, "POST", at(app, "evaluate") + query, body, headers={"Transfer-Encoding": "chunked"})
+        assert response.status == 400 and "Teilen" in response.error["detail"]
+        assert call(app, "POST", at(app, "evaluate") + query, body).status == 200          # the same request without it is fine
+
+    def test_an_oversized_length_is_refused_without_reading_the_body(self, app):
+        response = call(app, "POST", at(app, "evaluate") + "?stats=1&allrad=1", length=server.MAX_BODY_BYTES + 1, timeout=3)
+        assert response.status == 413 and response.error["code"] == "E305"
+        assert call(app, "POST", at(app, "evaluate"), length=10 ** 11, timeout=3).status == 413
+        assert call(app, "POST", at(app, "evaluate"), length=10 ** 12, timeout=3).status == 400      # 13 digits: not a length at all
+
+    def test_a_length_at_the_limit_is_not_refused_for_its_size(self, app, monkeypatch):
+        monkeypatch.setattr(server, "MAX_BODY_BYTES", 50)
+        response = call(app, "POST", at(app, "evaluate") + "?stats=50&allrad=0", b"x" * 50)
+        assert response.status != 413
+        assert call(app, "POST", at(app, "evaluate"), b"x" * 51).status == 413
+
+    def test_the_length_counts_the_bytes_that_follow(self, app):
+        body = b"".join(make_files(nrad=False).values())
+        response = call(app, "POST", at(app, "evaluate") + f"?stats=10&allrad={len(body) - 10}", body)
+        assert response.status == 422 or response.status == 400            # a statistics file of 10 bytes: refused
+
+    def test_sizes_in_the_query_that_do_not_add_up(self, app):
+        files = make_files(nrad=False)
+        body = files[STATISTICS] + files[ALLRAD]
+        response = call(app, "POST", at(app, "evaluate") + f"?stats={len(files[STATISTICS])}&allrad={len(files[ALLRAD]) + 1}", body)
+        assert response.status == 400 and response.error["code"] == "E304"
+
+    def test_an_empty_body(self, app):
+        response = call(app, "POST", at(app, "evaluate"), b"")
+        assert response.status == 400 and response.error["code"] == "E302"
+
+    def test_a_connection_that_ends_before_the_body_is_complete(self, app):
+        with socket.create_connection(("127.0.0.1", app.port), timeout=5) as sock:
+            sock.sendall(f"POST /{app.token}/evaluate?stats=100&allrad=0 HTTP/1.0\r\nHost: 127.0.0.1:{app.port}\r\nContent-Length: 100\r\n\r\n".encode() + b"x" * 10)
+            sock.shutdown(socket.SHUT_WR)
+            data = b""
+            while chunk := sock.recv(65536):
+                data += chunk
+        assert data.startswith(b"HTTP/1.0 400") and b'"E304"' in data
+        assert call(app, "GET", at(app)).status == 200
+
+    def test_a_body_shorter_than_announced_is_caught_by_the_length_even_if_the_query_matches_it(self, app):
+        # The query declares exactly the 10 bytes that arrive, so only the Content-Length check can notice.
+        with socket.create_connection(("127.0.0.1", app.port), timeout=5) as sock:
+            sock.sendall(f"POST /{app.token}/evaluate?stats=10&allrad=0 HTTP/1.0\r\nHost: 127.0.0.1:{app.port}\r\nContent-Length: 100\r\n\r\n".encode() + b"x" * 10)
+            sock.shutdown(socket.SHUT_WR)
+            data = b""
+            while chunk := sock.recv(65536):
+                data += chunk
+        assert data.startswith(b"HTTP/1.0 400")
+        assert json.loads(data.split(b"\r\n\r\n", 1)[1])["error"]["detail"] == "Angekündigt: 100 Bytes, empfangen: 10."
+
+    def test_a_client_that_stalls_is_dropped_with_an_answer(self, app, monkeypatch):
+        monkeypatch.setattr(server._Handler, "timeout", 0.3)
+        with socket.create_connection(("127.0.0.1", app.port), timeout=5) as sock:         # sends a part of the body and then nothing
+            sock.sendall(f"POST /{app.token}/evaluate?stats=100&allrad=0 HTTP/1.0\r\nHost: 127.0.0.1:{app.port}\r\nContent-Length: 100\r\n\r\n".encode() + b"x" * 10)
+            data = b""
+            while chunk := sock.recv(65536):
+                data += chunk
+        assert data.startswith(b"HTTP/1.0 400") and b'"E304"' in data and b"zu langsam" in data
+        assert call(app, "GET", at(app)).status == 200
+
+
+class TestNothingIsWrittenToTheConsole:
+
+    def test_not_for_good_requests_bad_requests_and_broken_connections(self, app, capfd):
+        post_files(app, make_files())
+        call(app, "GET", at(app, "download"))
+        call(app, "GET", "/nope")
+        call(app, "POST", at(app, "evaluate"), b"x")
+        for raw in (b"GARBAGE\r\n\r\n", b"GET / HTTP/1.0\r\n" + b"X: " + b"a" * 70000 + b"\r\n\r\n", b"POST /x HTTP/9.9\r\n\r\n", b"\x00\xff\xfe" * 100, b""):
+            with socket.create_connection(("127.0.0.1", app.port), timeout=0.5) as sock:   # some inputs never get an answer: a stalled client
+                sock.sendall(raw)
+                try:
+                    sock.recv(65536)
+                except OSError:
+                    pass
+        with socket.create_connection(("127.0.0.1", app.port), timeout=5) as sock:      # a client that vanishes mid-request
+            sock.sendall(f"POST /{app.token}/evaluate?stats=1000&allrad=0 HTTP/1.0\r\nHost: 127.0.0.1:{app.port}\r\nContent-Length: 1000\r\n\r\n".encode() + b"x" * 10)
+        call(app, "GET", at(app))                                                       # the server still answers
+        captured = capfd.readouterr()
+        assert captured.err == "" and captured.out == ""
+
+    def test_the_server_survives_garbage(self, app):
+        for raw in (b"GARBAGE\r\n\r\n", b"\x00" * 1000, b"GET\r\n\r\n"):
+            with socket.create_connection(("127.0.0.1", app.port), timeout=0.5) as sock:   # some inputs never get an answer: a stalled client
+                sock.sendall(raw)
+                try:
+                    sock.recv(65536)
+                except OSError:
+                    pass
+        assert call(app, "GET", at(app)).status == 200
+
+
+class BlockedEvaluation:
+    """Replaces evaluate(): signals that it started, waits to be released, then does the real work."""
+
+    def __init__(self, monkeypatch):
+        self.entered, self.release = threading.Event(), threading.Event()
+        real = server.evaluate
+
+        def blocked(*args, **kwargs):
+            self.entered.set()
+            self.release.wait(10)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(server, "evaluate", blocked)
+
+    def start(self, app):
+        answer = []
+        thread = threading.Thread(target=lambda: answer.append(post_files(app, make_files())), daemon=True)
+        thread.start()
+        assert self.entered.wait(5), "the evaluation did not start"
+        return thread, answer
+
+
+class TestOneEvaluationAtATime:
+
+    def test_a_second_evaluation_is_refused_at_once(self, app, monkeypatch):
+        blocked = BlockedEvaluation(monkeypatch)
+        thread, answer = blocked.start(app)
+        try:
+            start = time.perf_counter()
+            second = post_files(app, make_files())
+            assert time.perf_counter() - start < 2 and not answer                    # at once, while the first is still running
+            assert second.status == 409 and second.error["code"] == "E307" and second.error["hint"]
+        finally:
+            blocked.release.set()
+            thread.join(10)
+        assert answer[0].status == 200 and answer[0].json["ok"] is True
+        assert call(app, "GET", at(app, "download")).status == 200               # the first one finished normally
+        assert post_files(app, make_files()).status == 200                       # and the lock is free again
+
+    def test_the_other_routes_answer_while_an_evaluation_runs(self, app, monkeypatch):
+        blocked = BlockedEvaluation(monkeypatch)
+        thread, answer = blocked.start(app)
+        try:
+            assert call(app, "GET", at(app)).status == 200
+            assert call(app, "GET", at(app, "download")).status == 404           # no result while one is being made
+            assert call(app, "POST", at(app, "reset")).status == 200
+        finally:
+            blocked.release.set()
+            thread.join(10)
+
+    def test_the_lock_is_released_after_every_kind_of_failure(self, app, monkeypatch):
+        assert post_files(app, {STATISTICS: b"x", ALLRAD: b"y"}).status == 422
+        assert call(app, "POST", at(app, "evaluate"), length=None).status == 400
+        monkeypatch.setattr(server, "evaluate", lambda *a, **k: 1 / 0)
+        assert post_files(app, make_files()).status == 500
+        monkeypatch.undo()
+        assert post_files(app, make_files()).status == 200
+
+
+class TestShutdown:
+
+    @staticmethod
+    def port_is_closed(app):
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                socket.create_connection(("127.0.0.1", app.port), timeout=0.3).close()
+            except ConnectionRefusedError:            # only this means nobody listens any more: a reset or a
+                return True                           # timeout is what a full, unattended backlog looks like
+            except OSError:
+                pass
+            time.sleep(0.05)
+        return False
+
+    def test_it_answers_stops_serving_closes_the_port_and_clears_the_result(self, app):
+        post_files(app, make_files())
+        assert app.state.get_result() is not None
+        response = call(app, "POST", at(app, "shutdown"))
+        assert response.status == 200 and response.json == {"ok": True}
+        assert_secure_headers(response)
+        app.thread.join(5)
+        assert not app.thread.is_alive()
+        assert self.port_is_closed(app)
+        assert app.state.get_result() is None
+
+    def test_a_shutdown_without_a_result(self, app):
+        assert call(app, "POST", at(app, "shutdown")).status == 200
+        app.thread.join(5)
+        assert not app.thread.is_alive()
+
+    def test_it_does_not_wait_for_an_evaluation_that_is_stuck(self, app, monkeypatch):
+        blocked = BlockedEvaluation(monkeypatch)
+        thread, answer = blocked.start(app)
+        start = time.perf_counter()
+        response = call(app, "POST", at(app, "shutdown"))
+        assert response.status == 200 and time.perf_counter() - start < 2
+        app.thread.join(5)
+        assert not app.thread.is_alive() and self.port_is_closed(app)
+        assert app.state.get_result() is None
+        blocked.release.set()                                                   # the stuck evaluation now finishes ...
+        thread.join(10)
+        assert app.state.get_result() is None                                   # ... and its result is dropped
+
+    def test_a_refused_shutdown_does_not_stop_the_server(self, app):
+        for kwargs in ({"headers": {"Origin": "http://evil.example"}}, {"host": "evil.example"}):
+            assert call(app, "POST", at(app, "shutdown"), **kwargs).status == 403
+        assert call(app, "GET", at(app, "shutdown")).status == 405
+        assert call(app, "POST", f"/wrong/shutdown").status == 404
+        assert app.thread.is_alive() and call(app, "GET", at(app)).status == 200
+
+    def test_after_the_shutdown_nothing_is_served(self, app):
+        call(app, "POST", at(app, "shutdown"))
+        app.thread.join(5)
+        assert self.port_is_closed(app)
+        with pytest.raises(OSError):
+            call(app, "GET", at(app), timeout=2)
+
+    def test_serve_forever_returns_so_the_program_can_end(self):
+        s = create_server()
+        done = threading.Event()
+        thread = threading.Thread(target=lambda: (s.serve_forever(poll_interval=0.02), done.set()), daemon=True)
+        thread.start()
+        call(s, "POST", at(s, "shutdown"))
+        assert done.wait(5)
