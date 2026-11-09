@@ -121,8 +121,9 @@ cli/
 web/
   worker.py          iii HTTP worker — uses core/, streams xlsx back to client
 
-requirements.txt      CLI dependencies (openpyxl)
-requirements-web.txt  Web worker dependencies (openpyxl + iii-sdk)
+requirements.txt      CLI dependencies (openpyxl), exact versions
+requirements-web.txt  Web worker dependencies (openpyxl + iii-sdk), exact versions
+requirements-dev.txt  Test dependencies (pytest + openpyxl), exact versions
 ```
 
 The `core/` layer has no I/O and no side effects. Both the CLI and the web worker call the same functions — the only difference is how files arrive (paths vs. in-memory bytes) and how the result leaves (saved to disk vs. streamed over HTTP).
@@ -183,6 +184,8 @@ The worker receives the raw HTTP request (headers + body) as structured objects 
 ```bash
 pip install -r requirements-web.txt
 ```
+
+All versions are pinned (`==`) so a fresh install behaves like the tested one. `iii-sdk` is pinned to 0.11.3, the release the worker was written against: `web/worker.py` needs `from iii import http`, which exists up to 0.19.7 and is gone from 0.20.0. If your engine requires a newer SDK, change the pin and re-check the worker.
 
 You also need a running iii engine. Follow the [iii setup guide](https://github.com/iii-hq) to start one, or point `III_ENGINE_URL` at an existing instance.
 

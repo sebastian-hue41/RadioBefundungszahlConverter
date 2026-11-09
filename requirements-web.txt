@@ -1,2 +1,5 @@
-openpyxl>=3.1.0
-iii-sdk
+openpyxl==3.1.5
+et_xmlfile==2.0.0
+# web/worker.py needs `from iii import http`. That name exists up to iii-sdk 0.19.7 and is
+# gone from 0.20.0, so do not raise this pin without checking the worker against the new release.
+iii-sdk==0.11.3
