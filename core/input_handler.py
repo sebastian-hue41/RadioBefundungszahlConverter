@@ -409,6 +409,14 @@ def load_statistics(source: XlsxSource) -> dict:
         ind1_col = col_map.get("IND1")
         ind2_col = col_map.get("IND2")
 
+        # Read only the columns that are used. A sheet can declare thousands of
+        # columns, and the reader pads every row it has to invent (the rows between
+        # the cells that exist) to that width: without this limit a tiny file with
+        # one far-away cell keeps the loader busy for many seconds.
+        data_max_col = max(
+            25, leist_kurz_col, dok_datum_col, leistung_col or 0, ind1_col or 0, ind2_col or 0
+        )
+
         # ── Read examination rows ──────────────────────────────────────────
         leistungen: list[dict] = []
         current_date = None
@@ -419,7 +427,7 @@ def load_statistics(source: XlsxSource) -> dict:
         ind2_sequence: list[int] = []
 
         for row_num, row in enumerate(
-            ws.iter_rows(min_row=header_row_num + 1, values_only=True),
+            ws.iter_rows(min_row=header_row_num + 1, max_col=data_max_col, values_only=True),
             header_row_num + 1,
         ):
             row = list(row)
@@ -511,6 +519,16 @@ def load_statistics(source: XlsxSource) -> dict:
             for i, val in enumerate(ind2_sequence):
                 if i == len(ind2_sequence) - 1 or ind2_sequence[i + 1] <= val:
                     total_leistungen += val
+
+    except (FileValidationError, StatsValidationError, MemoryError):
+        raise
+    except Exception as exc:
+        # The parser met something it cannot read (cut-off XML, a missing part, …).
+        log.debug("Statistics file could not be read", exc_info=True)
+        raise StatsValidationError(
+            f"Cannot read statistics file (damaged or malformed content): "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
     finally:
         wb.close()
@@ -619,7 +637,12 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
         candidates: dict[str, list[dict]] = {}
         row_count = 0
 
-        for row_num, row in enumerate(ws.iter_rows(min_row=2, values_only=True), 2):
+        # Read only the columns that are used (see load_statistics).
+        data_max_col = max(section_col_indices) + 1
+
+        for row_num, row in enumerate(
+            ws.iter_rows(min_row=2, max_col=data_max_col, values_only=True), 2
+        ):
             row = list(row)
 
             def _get_map(col_0based):
@@ -710,6 +733,15 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
                     }
                     merged_duplicates.append(leist0_str)
 
+    except (FileValidationError, MapValidationError, MemoryError):
+        raise
+    except Exception as exc:
+        # The parser met something it cannot read (cut-off XML, a missing part, …).
+        log.debug("Map file could not be read", exc_info=True)
+        raise MapValidationError(
+            f"Cannot read map file (damaged or malformed content): {type(exc).__name__}: {exc}"
+        ) from exc
+
     finally:
         wb.close()
 
@@ -776,7 +808,8 @@ def load_reference_data(source: XlsxSource) -> "dict":
         header_skipped = False
         row_count = 0
 
-        for row_num, row in enumerate(ws.iter_rows(values_only=True), 1):
+        # Columns A-C are used; the first five decide whether a row is empty.
+        for row_num, row in enumerate(ws.iter_rows(max_col=5, values_only=True), 1):
             try:
                 row = list(row)
 

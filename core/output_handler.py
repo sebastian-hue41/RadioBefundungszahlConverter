@@ -7,6 +7,9 @@ Two public entry points:
       no files are ever written to disk on the server.
   save_output(result, output_dir) -> str
       Builds the workbook and saves it to disk. Used by the CLI.
+
+Both refuse to deliver a workbook that would hold a formula or a link
+(OutputValidationError): the result is text and numbers only.
 """
 
 import io
@@ -154,6 +157,31 @@ def _set_column_widths(ws, n_years: int, gesamt_col: int, has_reference: bool) -
 
     if has_reference:
         ws.column_dimensions[get_column_letter(gesamt_col + 1)].width = 13  # Benötigt
+
+
+# ── Final check ───────────────────────────────────────────────────────────────
+
+class OutputValidationError(ValueError):
+    """Raised when the finished workbook would hold something active (a formula or a link)."""
+
+
+def _assert_text_only(wb: openpyxl.Workbook) -> None:
+    """
+    Last line of defence: the result holds text and numbers only.
+
+    Every text taken from an input file is checked when that file is loaded; this
+    makes sure that a later change cannot let a formula or a link slip through
+    unnoticed. Conditional formatting (the colours) is not a cell and not affected.
+    """
+    for ws in wb.worksheets:
+        # Existing cells only: iter_rows() would create blank ones and change the file.
+        for cell in ws._cells.values():
+            if cell.data_type == "f" or cell.hyperlink is not None:
+                kind = "formula" if cell.data_type == "f" else "link"
+                raise OutputValidationError(
+                    f"The result would contain a {kind} in {ws.title}!{cell.coordinate} "
+                    "(potential formula injection); it was not created."
+                )
 
 
 # ── Workbook builder ──────────────────────────────────────────────────────────
@@ -440,6 +468,7 @@ def _build_workbook(
                 end_row=next_row, end_column=len(col_headers),
             )
 
+    _assert_text_only(wb)
     return filename, wb
 
 

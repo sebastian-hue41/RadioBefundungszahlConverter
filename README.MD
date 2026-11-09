@@ -357,6 +357,8 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 | Duplicate map entries, identical | Silently deduplicated |
 | Formula injection in cells or in map section names | Fatal error — file rejected as potentially malicious |
 | XML entity (DTD) declaration or non-UTF-8 XML in a file | Fatal error — file rejected as potentially malicious |
+| Damaged or malformed content inside a file (cut-off XML, missing part) | Fatal error with a clear message — 422 on the web, an `ERROR` line on the CLI |
+| The result would contain a formula or a link | Fatal error — nothing is delivered or written (500 on the web) |
 | VBA macros in file | Fatal error — file rejected |
 | File > 50 MB | Fatal error (CLI) / 413 response (web) — applies to the statistics upload |
 | Rows with unparseable dates | Skipped with a per-row warning; noted in output |
@@ -366,7 +368,7 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 | Individual reference row unparseable | That row skipped; rest of reference data used |
 | Section has no reference entry | Gesamt cell uncoloured; Benötigt cell left blank |
 | Request body > 60 MB | 413 before file is read into memory |
-| Processing timeout (> 60 s) | 503 response; worker continues serving other requests |
+| Waiting for the request or the response takes > 60 s | 503 response; worker continues serving other requests |
 
 ---
 
@@ -380,9 +382,12 @@ All user-uploaded files are treated as potentially malicious. Server-side files 
 - Zip bombs are detected: per-entry compression ratio > 50:1 or total uncompressed size > 200 MB
 - VBA macro presence causes immediate rejection
 - Every entry of the zip is scanned for XML entity / DTD declarations (`<!DOCTYPE`, `<!ENTITY`, …, also in UTF-16 form), and XML parts must be UTF-8. Otherwise the parser would resolve entities, and a file could inject text into the evaluation or exhaust memory. The scan runs after the zip bomb checks, so nothing is unpacked from an archive that failed them
-- File size is capped at 50 MB per file; the HTTP body is capped at 110 MB total
+- File size is capped at 50 MB per file; the HTTP body is capped at 60 MB
+- The loaders read only the columns they use. A sheet can declare thousands of columns, and the reader pads every missing row to that width, so a tiny file with one far-away cell used to keep the loader busy for about 15 seconds
+- Damaged or malformed content inside a file is reported as a validation error, not as an internal error
 - Every string cell value is checked for formula injection characters (`=`, `+`, `-`, `@`, `|`, …); so are the map's section names (column headers), which become the row labels of the output
+- The finished workbook is checked once more before it is delivered or written: it must hold no formula and no link
 - Reference amounts are bounds-checked (must be positive integers ≤ 1 000 000)
 - Map files are limited to 500 section columns to prevent memory exhaustion
 - All HTTP responses include `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`
-- Processing is time-limited to 60 seconds per request
+- Each request has a 60 second budget. It is enforced while the worker waits for input and output; the parsing itself cannot be interrupted, so it is bounded by the size limits above (50 MB per file, 200 MB unpacked, 500 000 rows, 500 section columns)
