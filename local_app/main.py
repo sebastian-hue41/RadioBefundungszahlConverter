@@ -14,6 +14,7 @@ must not be able to break the start, and a windowless build has no console at al
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 import threading
@@ -112,6 +113,10 @@ def main(
     or Ctrl+C), 1 if it could not start. `opener` and `on_ready(server)` exist for the tests.
     """
     args = _parser().parse_args(argv)
+    # core logs what it could not use, with file paths. Nothing of that belongs on the console of the app:
+    # the reasons are on the sheet of the Excel and in the hints of the page.
+    if not any(isinstance(handler, logging.NullHandler) for handler in logging.getLogger("core").handlers):
+        logging.getLogger("core").addHandler(logging.NullHandler())
 
     reference = load_reference(reference_path())
     try:

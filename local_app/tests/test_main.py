@@ -103,6 +103,31 @@ class TestAsAProgram:
                                 capture_output=True, timeout=30)
         assert helped.returncode == 0 and b"--no-browser" in helped.stdout, helped.stderr
 
+    def test_core_log_lines_stay_off_the_console_even_without_a_reference_file(self):
+        # In-process, pytest's own log handling would hide a missing silencer, so this runs a real process.
+        code = ("import pathlib, sys, local_app.main as m; m.reference_path = lambda: pathlib.Path('nirgends') / 'reference_amount.xlsx'; "
+                "sys.exit(m.main(['--no-browser']))")
+        proc = subprocess.Popen([sys.executable, "-B", "-c", code], cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        try:
+            url = None
+            for line in proc.stdout:
+                if b"running at: " in line:
+                    url = line.split(b"running at: ")[1].strip().decode("ascii")
+                    break
+            assert url
+            host, _, path = url.removeprefix("http://").partition("/")
+            conn = http.client.HTTPConnection(host, timeout=10)
+            conn.request("POST", "/" + path + "shutdown")
+            assert conn.getresponse().status == 200
+            assert proc.wait(15) == 0
+            assert proc.stderr.read() == b"", "core's log lines reached the console"
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.stdout.close()
+            proc.stderr.close()
+
     def test_help_and_wrong_arguments(self):
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
         helped = subprocess.run([sys.executable, "-B", "-m", "local_app.main", "--help"], cwd=ROOT, env=env, capture_output=True, timeout=30)

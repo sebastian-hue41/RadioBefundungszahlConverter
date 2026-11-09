@@ -1,0 +1,9 @@
+# What the single-file program is built from (see radiobefund_local.spec).
+# Everything is pinned: the same inputs give the same program.
+-r ../requirements.txt
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9
+altgraph==0.17.5
+macholib==1.16.4; sys_platform == "darwin"
+packaging==26.3
+setuptools==84.2.1

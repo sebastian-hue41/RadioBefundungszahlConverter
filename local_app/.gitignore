@@ -1,0 +1,2 @@
+# The project ignores *.txt; this one file is the pinned list of what the program is built from.
+!requirements-build.txt
