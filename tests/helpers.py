@@ -265,6 +265,13 @@ def make_result(
     }
 
 
+def assert_reference_unusable(data: dict, reason: str) -> None:
+    """A reference file that could not be used: nothing usable, and one problem that says why."""
+    assert data["amounts"] == {} and data["combinations"] == {} and data["order"] == []
+    assert len(data["problems"]) == 1, data["problems"]
+    assert data["problems"][0].startswith(f"Die Referenzdatei {reason}"), data["problems"]
+
+
 @pytest.fixture
 def tmp_xlsx(tmp_path):
     """Return a helper that saves a workbook to tmp_path and returns the path string."""

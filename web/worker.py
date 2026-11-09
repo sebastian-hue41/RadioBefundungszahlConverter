@@ -99,10 +99,25 @@ def _load_server_reference() -> dict:
             len(data.get("amounts", {})),
             len(data.get("combinations", {})),
         )
+        problems = data.get("problems") or []
+        if problems:
+            # Every result is built with this data, so every result carries these notes.
+            log.error(
+                "Reference file %s has %d problem(s); they are listed on every result sheet:",
+                ref_path, len(problems),
+            )
+            for text in problems:
+                log.error("  %s", text)
         return data
     except Exception as exc:
-        log.warning("Could not load reference file %s: %s — Benötigt column will be omitted", ref_path, exc)
-        return {}
+        log.error("Could not load reference file %s: %s — Benötigt column will be omitted", ref_path, exc)
+        return {
+            "amounts": {}, "combinations": {}, "order": [],
+            "problems": [
+                "Die Referenzdatei konnte nicht geladen werden — die Spalte „Benötigt“, "
+                "die Kombinationszeilen und die Reihenfolge der Referenzdatei fehlen in dieser Auswertung."
+            ],
+        }
 
 
 # Wall-clock budget for the entire request (read + parse + process + write).

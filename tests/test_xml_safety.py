@@ -16,6 +16,7 @@ from core.input_handler import (
 )
 
 from .helpers import (
+    assert_reference_unusable,
     make_map_wb,
     make_reference_wb,
     make_stats_wb,
@@ -26,7 +27,6 @@ from .helpers import (
 SHEET = "xl/worksheets/sheet1.xml"
 ROWS = [(1, 1, "01.01.2024", "MRT Schädel", "MRTS")]
 CODES = [("MRTS", "MRT Schädel", {"MRT": 1})]
-EMPTY_REFERENCE = {"amounts": {}, "combinations": {}, "order": []}
 
 
 # ── Builders ───────────────────────────────────────────────────────────────────
@@ -127,7 +127,10 @@ class TestDtdAndEntities:
             load_statistics(data)
 
     def test_the_reference_loader_still_never_raises(self):
-        assert load_reference_data(_with_doctype(_reference(), ATTACKS["internal_entity"])) == EMPTY_REFERENCE
+        assert_reference_unusable(
+            load_reference_data(_with_doctype(_reference(), ATTACKS["internal_entity"])),
+            "wurde von der Datei- und Sicherheitsprüfung abgelehnt",
+        )
 
     def test_files_read_by_path_are_covered_too(self, tmp_path):
         path = tmp_path / "hostile.xlsx"

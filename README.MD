@@ -326,7 +326,7 @@ Required examination counts per section. Controls the **Benötigt** column and c
 - **Column B** — required count (positive integer); rows with an empty Benötigt cell are tracked for ordering but receive no target
 - **Column C** — optional semicolon-separated list of component sections for a **combination row**: a virtual row that aggregates multiple map sections; the individual component sections are not removed from the output
 
-Configured via the `REFERENCE_FILE` environment variable (default: `reference_amount.xlsx`). If the file is absent or unreadable, the Benötigt column and colour coding are omitted and processing continues normally.
+Configured via the `REFERENCE_FILE` environment variable (default: `reference_amount.xlsx`). The reference file is optional, so processing continues without it, but nothing is dropped silently: if the file is absent, rejected or only partly usable, the reason is listed on the result sheet under **Hinweis: Probleme mit der Referenzdatei** (and logged, and printed as `WARNING (reference)` by the CLI). `load_reference_data` returns these reasons as `problems`, one German sentence each. They never contain a path or the content of a cell; at most 20 are listed, the rest is counted. The one case that stays quiet is the CLI without `--reference` and without a `reference_amount.xlsx` in the current directory.
 
 ---
 
@@ -366,9 +366,9 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 | File > 50 MB | Fatal error (CLI) / 413 response (web) — applies to the statistics upload |
 | Rows with unparseable dates | Skipped with a per-row warning; noted in output |
 | Count mismatch (processed ≠ expected) | Non-fatal; noted in output footer |
-| Reference file not found or unreadable | Benötigt column omitted; processing continues normally |
-| Reference file fails security check | Logged as warning; Benötigt column omitted |
-| Individual reference row unparseable | That row skipped; rest of reference data used |
+| Reference file not found, unreadable or fails the security check | Benötigt column omitted; processing continues; the reason is on the result sheet, in the log and (CLI) on stderr |
+| Individual reference row unusable (negative or non-numeric amount, amount > 1 000 000, formula-like or missing section name) | That row skipped; rest of reference data used; the row is listed on the result sheet. An amount of 0 means "no required amount" and is not reported |
+| Reference file without any usable amount | Benötigt column omitted; noted on the result sheet |
 | Section has no reference entry | Gesamt cell uncoloured; Benötigt cell left blank |
 | Request body > 60 MB | 413 before file is read into memory |
 | Waiting for the request or the response takes > 60 s | 503 response; worker continues serving other requests |

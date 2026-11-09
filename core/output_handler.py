@@ -220,10 +220,14 @@ def _build_workbook(
         _ref:          dict[str, int]  = reference_data.get("amounts", {})
         _combinations: dict[str, list] = reference_data.get("combinations", {})
         _ref_order:    list[str]       = reference_data.get("order", [])
+        _ref_problems = reference_data.get("problems") or []
     else:
         _ref          = reference_amounts or {}
         _combinations = {}
         _ref_order    = []
+        _ref_problems = []
+    # What the loader could not use of the reference file, as short plain text.
+    _ref_problems = [str(p)[:300] for p in _ref_problems if p] if isinstance(_ref_problems, list) else []
 
     _ref_lower: dict[str, int] = {k.lower(): v for k, v in _ref.items()}
     has_reference = bool(_ref)
@@ -401,6 +405,28 @@ def _build_workbook(
             end_row=next_row, end_column=len(col_headers),
         )
         for note in dropped_combos:
+            next_row += 1
+            c = ws.cell(row=next_row, column=1)
+            c.value = f"    •  {note}"
+            c.font = Font(name=_FONT, size=10, color=_TEXT_WARN)
+            ws.merge_cells(
+                start_row=next_row, start_column=1,
+                end_row=next_row, end_column=len(col_headers),
+            )
+
+    # ── Problems with the reference file ─────────────────────────────────────
+    # A missing "Benötigt" column or a row without a target must never be
+    # unexplained: the loader's reasons are listed here.
+    if _ref_problems:
+        next_row += 2
+        hl = ws.cell(row=next_row, column=1)
+        hl.value = "Hinweis: Probleme mit der Referenzdatei"
+        hl.font = Font(name=_FONT, size=10, bold=True, color=_TEXT_WARN)
+        ws.merge_cells(
+            start_row=next_row, start_column=1,
+            end_row=next_row, end_column=len(col_headers),
+        )
+        for note in _ref_problems:
             next_row += 1
             c = ws.cell(row=next_row, column=1)
             c.value = f"    •  {note}"

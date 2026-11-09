@@ -13,6 +13,7 @@ independent of this CLI so they can be called directly from a future API layer.
 """
 
 import argparse
+import os
 import sys
 
 from core.input_handler import (
@@ -77,16 +78,25 @@ def main() -> int:
     args = parser.parse_args()
 
     # ── Load reference data (optional, never fatal) ────────────────────────────
+    # The file is optional, so the evaluation goes on without it. Nothing is dropped
+    # silently, though: a file that is missing although --reference named it, or that
+    # was rejected or only partly usable, is reported here and on the result sheet.
     reference_path = args.reference or "reference_amount.xlsx"
     print(f"[ref] Looking for reference amounts: {reference_path}")
-    reference_data = load_reference_data(reference_path)
-    if reference_data["amounts"]:
-        n = len(reference_data["amounts"])
-        nc = len(reference_data["combinations"])
-        print(f"  -> {n} section(s) with required amounts loaded"
-              + (f", {nc} combination(s)" if nc else ""))
+    if not args.reference and not os.path.exists(reference_path):
+        reference_data = {"amounts": {}, "combinations": {}, "order": [], "problems": []}
+        print("  -> No reference file found — 'Benötigt' column will be omitted")
     else:
-        print("  -> No reference amounts found — 'Benötigt' column will be omitted")
+        reference_data = load_reference_data(reference_path)
+        if reference_data["amounts"]:
+            n = len(reference_data["amounts"])
+            nc = len(reference_data["combinations"])
+            print(f"  -> {n} section(s) with required amounts loaded"
+                  + (f", {nc} combination(s)" if nc else ""))
+        else:
+            print("  -> No reference amounts loaded — 'Benötigt' column will be omitted")
+        for text in reference_data["problems"]:
+            print(f"  WARNING (reference): {text}", file=sys.stderr)
 
     # ── Load statistics ────────────────────────────────────────────────────────
     print(f"[1/3] Loading statistics: {args.statistics}")

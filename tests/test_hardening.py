@@ -44,6 +44,7 @@ from core.output_handler import (                                  # noqa: E402
 from web import worker                                             # noqa: E402
 
 from .helpers import (                                             # noqa: E402
+    assert_reference_unusable,
     make_map_wb,
     make_multipart_body,
     make_reference_wb,
@@ -55,7 +56,6 @@ from .helpers import (                                             # noqa: E402
 SHEET = "xl/worksheets/sheet1.xml"
 ROWS = [(1, 1, "01.01.2024", "MRT Schädel", "MRTS")]
 CODES = [("MRTS", "MRT Schädel", {"MRT": 1})]
-EMPTY_REFERENCE = {"amounts": {}, "combinations": {}, "order": []}
 
 
 # ── Builders ───────────────────────────────────────────────────────────────────
@@ -216,7 +216,7 @@ class TestDamagedContent:
         assert info.value.__cause__ is not None
 
     def test_the_reference_loader_still_never_raises(self):
-        assert load_reference_data(_truncated(_reference())) == EMPTY_REFERENCE
+        assert_reference_unusable(load_reference_data(_truncated(_reference())), "ist beschädigt oder nicht vollständig lesbar")
 
     def test_our_own_errors_are_passed_on_unchanged(self):
         # a statistics file that is no statistics file

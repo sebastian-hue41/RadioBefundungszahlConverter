@@ -38,6 +38,7 @@ _MAX_UNCOMPRESSED_MB = 200   # total uncompressed content across the whole archi
 
 _MAX_REFERENCE_ROWS = 10_000
 _MAX_REFERENCE_AMOUNT = 1_000_000
+_MAX_REFERENCE_PROBLEMS = 20      # listed one by one; further ones are only counted
 
 # Cells/values starting with these chars are formula injection attempts.
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "|", "\t", "\r")
@@ -754,6 +755,22 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
 
 # ── Reference amounts loader ───────────────────────────────────────────────────
 
+def _reference_rejected(reason: str) -> dict:
+    """The structure for a reference file that could not be used at all."""
+    return {
+        "amounts": {}, "combinations": {}, "order": [],
+        "problems": [
+            f"Die Referenzdatei {reason} — die Spalte „Benötigt“, die Kombinationszeilen "
+            "und die Reihenfolge der Referenzdatei fehlen in dieser Auswertung."
+        ],
+    }
+
+
+def _shown(name: str) -> str:
+    """A section name shortened for a note."""
+    return name if len(name) <= 60 else name[:57] + "..."
+
+
 def load_reference_data(source: XlsxSource) -> "dict":
     """
     Loads the full reference structure from a reference xlsx.
@@ -772,38 +789,62 @@ def load_reference_data(source: XlsxSource) -> "dict":
         amounts      dict[str, int]        section → required count (col B > 0)
         combinations dict[str, list[str]]  combination name → ordered component list
         order        list[str]             all section names in file order
+        problems     list[str]             what could not be used, one German sentence each
+                                           (empty when the file was read completely)
 
-    Returns {"amounts": {}, "combinations": {}, "order": []} on ANY error — never raises.
-    All problems are logged at WARNING so normal processing is never interrupted.
+    Never raises: the reference file is optional, so a file that cannot be used gives
+    empty amounts / combinations / order and one problem that says why. Rows that are
+    skipped add a problem each (at most _MAX_REFERENCE_PROBLEMS are listed, the rest is
+    counted). The problems also go to the log at WARNING. The caller decides what to
+    show: the output puts them on the result sheet, so a missing "Benötigt" column is
+    never left unexplained. A problem never contains a path or the content of a cell
+    other than a section name that passed the formula check.
     """
-    empty: dict = {"amounts": {}, "combinations": {}, "order": []}
+    # ── The file must exist (a path only) ──────────────────────────────────────
+    if isinstance(source, (str, Path)):
+        try:
+            exists = Path(source).exists()
+        except (OSError, ValueError):
+            exists = True              # let the validation below report it
+        if not exists:
+            log.warning("Reference amounts: file not found: %s", source)
+            return _reference_rejected("wurde nicht gefunden")
 
     # ── Validate and normalise source ──────────────────────────────────────────
     try:
         src = _resolve_source(source, "reference_amount.xlsx")
     except FileValidationError as exc:
         log.warning("Reference amounts file failed security validation: %s", exc)
-        return empty
+        return _reference_rejected("wurde von der Datei- und Sicherheitsprüfung abgelehnt (Einzelheiten im Protokoll)")
     except Exception as exc:
         log.warning("Reference amounts: unexpected validation error: %s", exc)
-        return empty
+        return _reference_rejected("konnte nicht geprüft werden (Einzelheiten im Protokoll)")
 
     # ── Open workbook ──────────────────────────────────────────────────────────
     try:
         wb = openpyxl.load_workbook(src, read_only=True, data_only=True)
     except Exception as exc:
         log.warning("Reference amounts: cannot open file: %s", exc)
-        return empty
+        return _reference_rejected("ist beschädigt oder nicht lesbar")
 
     amounts: dict[str, int] = {}
     combinations: dict[str, list] = {}
     order: list[str] = []
+    problems: list[str] = []
+    not_listed = 0
+
+    def problem(text: str) -> None:
+        nonlocal not_listed
+        if len(problems) < _MAX_REFERENCE_PROBLEMS:
+            problems.append(text)
+        else:
+            not_listed += 1
 
     try:
         ws = wb.active
         if ws is None:
             log.warning("Reference amounts: no active worksheet found")
-            return empty
+            return _reference_rejected("enthält kein Tabellenblatt")
 
         header_skipped = False
         row_count = 0
@@ -831,14 +872,19 @@ def load_reference_data(source: XlsxSource) -> "dict":
                         "Reference amounts: file exceeds the %d-row limit — stopping early",
                         _MAX_REFERENCE_ROWS,
                     )
+                    problem(
+                        f"Mehr als {_MAX_REFERENCE_ROWS:,} Zeilen — der Rest der Datei wurde nicht gelesen."
+                    )
                     break
 
                 name_raw = row[0] if len(row) > 0 else None
-                if name_raw is None:
-                    continue
-
-                name_str = str(name_raw).strip()
+                name_str = str(name_raw).strip() if name_raw is not None else ""
                 if not name_str:
+                    # No section name: nothing to attach an amount or a combination to.
+                    # A row that holds one in B or C is reported, a row with only
+                    # notes further right is not.
+                    if any(v is not None and str(v).strip() for v in row[1:3]):
+                        problem(f"Zeile {row_num}: Es steht kein Bereichsname in Spalte A — Zeile übersprungen.")
                     continue
 
                 # Reject formula injection in section names.
@@ -846,6 +892,7 @@ def load_reference_data(source: XlsxSource) -> "dict":
                     _check_cell_for_injection(name_str, f"reference name at row {row_num}")
                 except FileValidationError as exc:
                     log.warning("Reference amounts: skipping row %d — %s", row_num, exc)
+                    problem(f"Zeile {row_num}: Der Bereichsname sieht wie eine Formel aus — Zeile übersprungen.")
                     continue
 
                 order.append(name_str)
@@ -860,10 +907,19 @@ def load_reference_data(source: XlsxSource) -> "dict":
                                 "Reference amounts: non-positive value %d at row %d, skipping",
                                 amount, row_num,
                             )
+                            if amount < 0:       # 0 is how a row says "no required amount"
+                                problem(
+                                    f"Zeile {row_num} („{_shown(name_str)}“): Der Wert in „Benötigt“ ist "
+                                    "negativ — es wird kein Zielwert angezeigt."
+                                )
                         elif amount > _MAX_REFERENCE_AMOUNT:
                             log.warning(
                                 "Reference amounts: implausibly large value %d at row %d, skipping",
                                 amount, row_num,
+                            )
+                            problem(
+                                f"Zeile {row_num} („{_shown(name_str)}“): Der Wert in „Benötigt“ ist "
+                                f"größer als {_MAX_REFERENCE_AMOUNT:,} — es wird kein Zielwert angezeigt."
                             )
                         else:
                             amounts[name_str] = amount
@@ -871,6 +927,10 @@ def load_reference_data(source: XlsxSource) -> "dict":
                         log.warning(
                             "Reference amounts: cannot parse amount %r at row %d, skipping",
                             amount_raw, row_num,
+                        )
+                        problem(
+                            f"Zeile {row_num} („{_shown(name_str)}“): Der Wert in „Benötigt“ ist "
+                            "keine Zahl — es wird kein Zielwert angezeigt."
                         )
 
                 # ── Col C: optional combination definition ─────────────────────
@@ -886,11 +946,12 @@ def load_reference_data(source: XlsxSource) -> "dict":
 
             except Exception as exc:
                 log.warning("Reference amounts: error processing row %d — %s", row_num, exc)
+                problem(f"Zeile {row_num}: konnte nicht gelesen werden — Zeile übersprungen.")
                 continue
 
     except Exception as exc:
         log.warning("Reference amounts: unexpected error reading file — %s", exc)
-        return empty
+        return _reference_rejected("ist beschädigt oder nicht vollständig lesbar")
 
     finally:
         try:
@@ -898,7 +959,13 @@ def load_reference_data(source: XlsxSource) -> "dict":
         except Exception:
             pass
 
-    return {"amounts": amounts, "combinations": combinations, "order": order}
+    if not amounts:
+        log.warning("Reference amounts: the file holds no usable required amounts")
+        problem("Die Referenzdatei enthält keine Zielwerte (Spalte B) — die Spalte „Benötigt“ fehlt.")
+    if not_listed:
+        problems.append(f"… und {not_listed} weitere Probleme (nicht einzeln aufgeführt).")
+
+    return {"amounts": amounts, "combinations": combinations, "order": order, "problems": problems}
 
 
 def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
@@ -907,7 +974,8 @@ def load_reference_amounts(source: XlsxSource) -> "dict[str, int]":
 
     Backward-compatible wrapper around load_reference_data — returns only the
     amounts dict.  Use load_reference_data() when combination and ordering
-    information is also needed.
+    information is also needed, or when the reasons for a missing amount matter
+    (its "problems"); this wrapper cannot report them.
 
     Returns {} on ANY error — never raises.
     """

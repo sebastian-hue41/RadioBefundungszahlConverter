@@ -21,6 +21,7 @@ from core.input_handler import (
     validate_xlsx_file,
 )
 from .helpers import (
+    assert_reference_unusable,
     inject_vba_into_xlsx,
     make_corrupt_xlsx_bytes,
     make_map_wb,
@@ -642,7 +643,7 @@ class TestLoadReferenceData:
 
     def test_nonexistent_file_returns_empty_structure(self):
         data = load_reference_data("/nonexistent/path.xlsx")
-        assert data == {"amounts": {}, "combinations": {}, "order": []}
+        assert_reference_unusable(data, "wurde nicht gefunden")
 
     def test_bytes_input_accepted(self):
         combos = {"Combo": ["A", "B"]}
