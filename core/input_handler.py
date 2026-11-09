@@ -13,6 +13,7 @@ import io
 import logging
 import re
 import zipfile
+import zlib
 from datetime import datetime
 from pathlib import Path
 from typing import Union
@@ -41,6 +42,31 @@ _MAX_REFERENCE_AMOUNT = 1_000_000
 # Cells/values starting with these chars are formula injection attempts.
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "|", "\t", "\r")
 
+# XML content scan. The parser resolves entities declared in a DTD, which lets a
+# file inject text into the evaluation or exhaust memory. No part of an xlsx needs
+# a DTD, so any declaration is refused. XML must be UTF-8: UTF-16 or an exotic
+# declared encoding could hide the declaration from a byte scan.
+_SCAN_CHUNK = 1 << 20          # zip entries are read in pieces of 1 MiB
+_XML_HEAD_BYTES = 4096         # an XML part has no NUL byte in its first 4 KiB
+_XML_SUFFIXES = (".xml", ".rels", ".vml")
+_DTD_KEYWORDS = ("<!doctype", "<!entity", "<!element", "<!attlist", "<!notation")
+# Matched case-insensitively, as ASCII and in both UTF-16 forms.
+_DTD_MARKERS = tuple(
+    keyword.encode(encoding)
+    for keyword in _DTD_KEYWORDS
+    for encoding in ("ascii", "utf-16-le", "utf-16-be")
+)
+_DTD_STARTS = (b"<!", b"<\x00!\x00", b"\x00<\x00!")   # cheap pre-filter: most chunks have none
+_DTD_OVERLAP = max(len(marker) for marker in _DTD_MARKERS) - 1
+_XML_ENCODING_RE = re.compile(
+    rb"\A(?:\xef\xbb\xbf)?\s*<\?xml\b[^>]*?\bencoding\s*=\s*[\"']([^\"']*)[\"']", re.IGNORECASE
+)
+_UTF8_NAMES = {"utf-8", "utf8"}
+# What reading a damaged or encrypted zip entry raises.
+_UNREADABLE_ENTRY = (
+    zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError, NotImplementedError, EOFError, zlib.error,
+)
+
 
 # ── Custom exceptions ──────────────────────────────────────────────────────────
 
@@ -65,6 +91,48 @@ class MapValidationError(ValueError):
 
 # ── Shared security validation ─────────────────────────────────────────────────
 
+def _check_xml_head(chunk: bytes, name: str, label: str) -> None:
+    """XML parts must be UTF-8: no NUL bytes (UTF-16/32) and no other declared encoding."""
+    head = chunk[:_XML_HEAD_BYTES]
+    match = _XML_ENCODING_RE.match(head)
+    declared = (
+        match.group(1).decode("ascii", "replace").lower().replace("_", "-") if match else None
+    )
+    if b"\x00" in head or (declared is not None and declared not in _UTF8_NAMES):
+        raise FileValidationError(
+            f"Unsupported XML encoding in zip entry {name!r} (only UTF-8 is accepted): {label}"
+        )
+
+
+def _scan_zip_entry(zf: zipfile.ZipFile, info: zipfile.ZipInfo, label: str) -> None:
+    """Refuse a DTD / entity declaration anywhere in the entry, and non-UTF-8 XML parts."""
+    name = info.filename
+    is_xml = name.lower().endswith(_XML_SUFFIXES)
+    carry = b""
+    first = True
+    try:
+        with zf.open(info) as entry:
+            while True:
+                chunk = entry.read(_SCAN_CHUNK)
+                if not chunk:
+                    break
+                if first and is_xml:
+                    _check_xml_head(chunk, name, label)
+                first = False
+                window = (carry + chunk).lower()
+                if any(start in window for start in _DTD_STARTS) and any(
+                    marker in window for marker in _DTD_MARKERS
+                ):
+                    raise FileValidationError(
+                        f"Potential XML entity attack (DTD declaration) in zip entry {name!r}: {label}"
+                    )
+                carry = window[-_DTD_OVERLAP:]   # a marker may straddle two chunks
+    except _UNREADABLE_ENTRY as exc:
+        raise FileValidationError(
+            f"File is not a valid xlsx archive (corrupt or disguised file): {label}"
+        ) from exc
+
+
 def _validate_zip_content(data: bytes, label: str) -> None:
     """
     Inspect xlsx bytes as a zip archive.
@@ -77,6 +145,7 @@ def _validate_zip_content(data: bytes, label: str) -> None:
       - Absence of VBA macros
       - No path-traversal entry names (absolute paths or ".." components)
       - No zip bomb: per-entry compression ratio and total uncompressed size
+      - No DTD / entity declarations in any entry; XML parts are UTF-8
     """
     try:
         with zipfile.ZipFile(io.BytesIO(data), "r") as zf:
@@ -120,6 +189,11 @@ def _validate_zip_content(data: bytes, label: str) -> None:
                     f"({total_uncompressed // (1024 * 1024)} MB) "
                     f"exceeds the {_MAX_UNCOMPRESSED_MB} MB limit: {label}"
                 )
+
+            # XML content — only after the zip bomb checks, which look at headers alone,
+            # so nothing is unpacked from an archive that failed them.
+            for info in infos:
+                _scan_zip_entry(zf, info, label)
 
     except zipfile.BadZipFile as exc:
         raise FileValidationError(
@@ -521,6 +595,9 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
                 continue
             if not include_underscore_columns and name.startswith("_"):
                 continue
+            # Section names become the row labels of the output, so a formula in
+            # a header cell must not get that far.
+            _check_cell_for_injection(name, f"section name {name!r}")
             sections.append(name)
             section_col_indices.append(col_idx)
 
