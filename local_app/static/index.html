@@ -10,12 +10,16 @@
     --bg: #f4f6f9; --card: #ffffff; --text: #1b2230; --muted: #596273; --line: #cfd5df;
     --accent: #2457d6; --accent-text: #ffffff; --accent-soft: #e9effc;
     --error: #a8231b; --error-bg: #fdeceb;
+    --danger: #c62828; --danger-text: #ffffff;
+    --ach-green: #d5f5e3; --ach-yellow: #fcf3cf; --ach-orange: #fae5d3; --ach-red: #fadbd8;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #11141a; --card: #1a1f29; --text: #e8ebf1; --muted: #a0a9ba; --line: #394253;
       --accent: #7aa2f7; --accent-text: #0c1220; --accent-soft: #232d46;
       --error: #ff9a91; --error-bg: #3b2321;
+      --danger: #ff8a80; --danger-text: #2a0a08;
+      --ach-green: #1f4a35; --ach-yellow: #4a4220; --ach-orange: #52371f; --ach-red: #532628;
     }
   }
   * { box-sizing: border-box; }
@@ -29,6 +33,7 @@
     max-width: 38rem; margin: 0 auto; padding: 1.75rem;
     background: var(--card); border: 1px solid var(--line); border-radius: 14px;
   }
+  .card.wide { max-width: 62rem; }            /* the result: room for a table with many years */
   h1 { margin: 0 0 1.25rem; font-size: 1.5rem; line-height: 1.25; }
   h2, legend { margin: 0 0 .6rem; padding: 0; font-size: 1.05rem; font-weight: 600; }
   fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
@@ -72,10 +77,15 @@
     background: var(--accent); color: var(--accent-text); font-weight: 600;
   }
   .primary:disabled { opacity: .45; cursor: not-allowed; }
-  .primary:focus-visible, .link:focus-visible, .quiet:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
-  .link, .quiet { padding: .25rem 0; border: 0; background: none; color: var(--accent); cursor: pointer; text-decoration: underline; }
-  .quiet { color: var(--muted); font-size: .9rem; }
+  .primary:focus-visible, .link:focus-visible, .danger:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  .link { padding: .25rem 0; border: 0; background: none; color: var(--accent); cursor: pointer; text-decoration: underline; }
+  .danger {
+    padding: .6rem 1.2rem; border: 0; border-radius: 8px; cursor: pointer;
+    background: var(--danger); color: var(--danger-text); font-weight: 600;
+  }
+  .danger:hover { filter: brightness(.92); }
   .small { padding: .35rem .8rem; border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--text); cursor: pointer; }
+  .small.danger { border: 0; background: var(--danger); color: var(--danger-text); }
 
   .error {
     margin: 0 0 1.25rem; padding: .9rem 1rem; border-left: 4px solid var(--error);
@@ -94,16 +104,43 @@
   .result p { margin: 0 0 .2rem; overflow-wrap: anywhere; }
   .result .actions { margin: 1.25rem 0 1rem; }
   .saved { margin: 0; color: var(--accent); font-weight: 600; }
+  .preview { margin: 1.25rem 0 1rem; }
+  .preview h3 { margin: 0 0 .4rem; font-size: 1rem; }
+  .toggle { display: inline-flex; align-items: center; gap: .5rem; margin: 0 0 .5rem; font-size: .9rem; cursor: pointer; }
+  .toggle input { width: 1.05rem; height: 1.05rem; accent-color: var(--accent); }
+  .table-wrap { max-height: 24rem; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+  .table-wrap:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  table { width: 100%; border-collapse: collapse; font-size: .9rem; font-variant-numeric: tabular-nums; }
+  th, td { padding: .3rem .6rem; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+  thead th { position: sticky; top: 0; z-index: 2; background: var(--card); border-bottom: 2px solid var(--line); }
+  tbody th { position: sticky; left: 0; z-index: 1; background: var(--card); text-align: left; font-weight: 500; white-space: normal; min-width: 11rem; }
+  thead th:first-child { left: 0; z-index: 3; text-align: left; }
+  td.zero { color: var(--muted); }
+  /* Gesamt and Benötigt stay at the right edge while the years scroll: the numbers that matter are never cut off */
+  th.total, td.total, th.target, td.target { position: sticky; right: 0; z-index: 1; min-width: 5.5rem; background: var(--card); border-left: 1px solid var(--line); }
+  table.has-target th.total, table.has-target td.total { right: 5.5rem; }
+  thead th.total, thead th.target { z-index: 3; }
+  td.total { font-weight: 700; }
+  td.ach-green { background: var(--ach-green); } td.ach-yellow { background: var(--ach-yellow); }
+  td.ach-orange { background: var(--ach-orange); } td.ach-red { background: var(--ach-red); }
+  .hide-empty tr.empty-row { display: none; }
+  .small-print { margin: .4rem 0 0; font-size: .85rem; }
   .hints summary { cursor: pointer; color: var(--accent); }
   .hints ul { margin: .5rem 0 0; padding-left: 1.2rem; }
   .hints li { margin: 0 0 .3rem; overflow-wrap: anywhere; }
   .code { font-variant-numeric: tabular-nums; font-weight: 600; margin-right: .35rem; }
 
   footer {
-    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem 1rem;
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .75rem 1rem;
     margin-top: 1.75rem; padding-top: 1rem; border-top: 1px solid var(--line);
   }
+  .idle-warn + footer { margin-top: .75rem; }
   .confirm { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; font-size: .9rem; }
+  .footer-idle { display: flex; flex-wrap: wrap; align-items: center; gap: .25rem .75rem; font-size: .85rem; color: var(--muted); }
+  .footer-idle .link { font-size: .85rem; }
+  .idle { font-variant-numeric: tabular-nums; }
+  .idle.warn { color: var(--danger); font-weight: 600; }
+  .idle-warn { margin: 1.25rem 0 0; padding: .6rem .9rem; border-left: 4px solid var(--danger); border-radius: 6px; background: var(--error-bg); font-size: .95rem; }
   .version { font-size: .8rem; color: var(--muted); }
   @media (max-width: 30rem) {
     body { padding: 0; }
@@ -112,7 +149,7 @@
 </style>
 </head>
 <body>
-<main class="card">
+<main class="card" id="card">
   <h1>Befundungszahlen auswerten</h1>
   <noscript><p class="error">Diese Seite braucht JavaScript. Bitte JavaScript im Browser einschalten.</p></noscript>
 
@@ -183,6 +220,17 @@
       <button type="button" id="again" class="link">Weitere Statistik hochladen</button>
     </div>
     <p class="saved" id="saved" role="status" hidden>✓ Die Excel-Datei wurde gespeichert.</p>
+    <section class="preview" id="preview" aria-labelledby="preview-title" hidden>
+      <h3 id="preview-title">Vorschau</h3>
+      <label class="toggle" for="hide-empty"><input type="checkbox" id="hide-empty">Leere Zeilen ausblenden</label>
+      <div class="table-wrap" id="table-wrap" tabindex="0" role="region" aria-labelledby="preview-title">
+        <table id="preview-table">
+          <thead id="preview-head"></thead>
+          <tbody id="preview-body"></tbody>
+        </table>
+      </div>
+      <p class="muted small-print" id="preview-note"></p>
+    </section>
     <details class="hints" id="hints" hidden>
       <summary id="hints-summary"></summary>
       <ul id="hints-list"></ul>
@@ -190,17 +238,28 @@
   </section>
 
   <section id="view-closed" role="status" hidden>
-    <h2>Das Programm wurde beendet.</h2>
-    <p>Sie können dieses Fenster jetzt schließen.</p>
+    <h2 id="closed-title">Das Programm wurde beendet.</h2>
+    <p id="closed-text">Sie können dieses Fenster jetzt schließen.</p>
   </section>
 
+  <p class="idle-warn" id="idle-warn" role="alert" hidden>Das Programm beendet sich bald von selbst. Jede Eingabe verlängert die Zeit.</p>
   <footer id="footer">
     <div>
-      <button type="button" id="quit" class="quiet">Server beenden</button>
+      <button type="button" id="quit" class="danger">Server beenden</button>
       <div class="confirm" id="confirm" role="alert" hidden>
         <span>Das Ergebnis wurde noch nicht heruntergeladen. Trotzdem beenden?</span>
-        <button type="button" id="quit-yes" class="small">Ja, beenden</button>
+        <button type="button" id="quit-yes" class="small danger">Ja, beenden</button>
         <button type="button" id="quit-no" class="small">Abbrechen</button>
+      </div>
+    </div>
+    <div class="footer-idle" id="idle-box" hidden>
+      <span class="idle" id="idle" role="timer"></span>
+      <button type="button" id="idle-off" class="link">Automatisches Beenden ausschalten</button>
+      <button type="button" id="idle-on" class="link" hidden>Automatisches Beenden einschalten</button>
+      <div class="confirm" id="idle-confirm" role="alert" hidden>
+        <span>Das Programm beendet sich dann nicht mehr von selbst. Wirklich ausschalten?</span>
+        <button type="button" id="idle-yes" class="small">Ja, ausschalten</button>
+        <button type="button" id="idle-no" class="small">Abbrechen</button>
       </div>
     </div>
     <span class="version" id="version"></span>
@@ -318,6 +377,7 @@
 
   function show(view) {
     for (const id of ["view-form", "view-result", "view-closed"]) $(id).hidden = id !== view;
+    $("card").classList.toggle("wide", view === "view-result");
     $("footer").hidden = view === "view-closed";
   }
 
@@ -445,6 +505,72 @@
     return match ? match[1] + " – " + match[2] : text || "";
   }
 
+  // The colour of the Gesamt cell follows the Excel: share of Benötigt, green from 100 %, yellow from 80 %, orange from 50 %, else red.
+  function achievement(total, target) {
+    if (typeof total !== "number" || typeof target !== "number" || target <= 0 || total <= 0) return null;
+    const ratio = total / target;
+    const name = ratio >= 1 ? "ach-green" : ratio >= 0.8 ? "ach-yellow" : ratio >= 0.5 ? "ach-orange" : "ach-red";
+    return { name, text: ratio < 0.01 ? "unter 1 % des Ziels" : Math.round(ratio * 100) + " % des Ziels" };
+  }
+
+  function updatePreviewNote() {
+    const table = $("preview-table");
+    const rows = table.tBodies[0].rows.length;
+    const empty = table.tBodies[0].querySelectorAll("tr.empty-row").length;
+    const parts = [number.format(rows) + " Zeilen"];
+    if ($("hide-empty").checked && empty) parts.push(number.format(empty) + " leere Zeilen ausgeblendet");
+    if (table.dataset.target) parts.push("Farbe von Gesamt im Verhältnis zu Benötigt: grün ab 100 %, gelb ab 80 %, orange ab 50 %, sonst rot");
+    $("preview-note").textContent = parts.join(" · ");
+  }
+
+  function renderPreview(preview) {
+    const table = $("preview-table");
+    $("preview-head").replaceChildren();
+    $("preview-body").replaceChildren();
+    if (!preview || !Array.isArray(preview.columns) || !preview.columns.length) { $("preview").hidden = true; return; }
+    const total = preview.total_column, target = preview.target_column;
+    table.dataset.target = target === null || target === undefined ? "" : "1";
+    const head = document.createElement("tr");
+    table.classList.toggle("has-target", Boolean(table.dataset.target));
+    preview.columns.forEach((name, index) => {
+      const cell = document.createElement("th");
+      cell.scope = "col";
+      if (index === total) cell.className = "total";
+      if (index === target) cell.className = "target";
+      cell.textContent = name === null ? "" : String(name);
+      head.append(cell);
+    });
+    $("preview-head").append(head);
+    for (const values of preview.rows) {
+      const row = document.createElement("tr");
+      const empty = values.slice(1).every((value, index) => (index + 1 === target ? value === null : !value));
+      if (empty) row.className = "empty-row";
+      values.forEach((value, index) => {
+        const cell = document.createElement(index === 0 ? "th" : "td");
+        if (index === 0) cell.scope = "row";
+        else cell.className = typeof value === "number" && value === 0 && index !== target ? "zero" : "";
+        if (index === target) cell.classList.add("target");
+        cell.textContent = value === null ? "" : typeof value === "number" ? number.format(value) : String(value);
+        if (index === total) {
+          cell.classList.add("total");
+          const level = achievement(value, values[target]);
+          if (level) { cell.classList.add(level.name); cell.title = level.text; }
+        }
+        row.append(cell);
+      });
+      $("preview-body").append(row);
+    }
+    table.classList.toggle("hide-empty", $("hide-empty").checked);
+    updatePreviewNote();
+    $("table-wrap").scrollTop = 0;
+    $("preview").hidden = false;
+  }
+
+  $("hide-empty").addEventListener("change", () => {
+    $("preview-table").classList.toggle("hide-empty", $("hide-empty").checked);
+    updatePreviewNote();
+  });
+
   function showResult(summary) {
     state.summary = summary;
     state.hasResult = true;
@@ -468,6 +594,7 @@
     $("hints").hidden = hints.length === 0;
     $("hints").open = false;
     $("hints-summary").textContent = hints.length === 1 ? "1 Hinweis anzeigen" : hints.length + " Hinweise anzeigen";
+    renderPreview(summary.preview);
     show("view-result");
     $("result-title").focus();
   }
@@ -541,6 +668,8 @@
 
   $("quit").addEventListener("click", () => {
     if (state.hasResult && !state.downloaded) {
+      $("idle-confirm").hidden = true;
+      renderIdle();
       $("confirm").hidden = false;
       $("quit-no").focus();
     } else {
@@ -553,9 +682,133 @@
     $("quit").focus();
   });
 
+  // ── Stopping by itself after a while without use ──────────────────────────
+  // The program counts the time itself. Every click, key press, scroll or dropped file is reported to it (at most
+  // every 5 seconds); asking how much time is left does not count as use. Here the counter only mirrors the program.
+  const idle = { enabled: false, limit: null, deadline: 0, lastActivity: 0, lastSent: 0, polled: 0, pending: null, checking: false, lost: false };
+
+  function clock(seconds) {
+    return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+  }
+
+  function renderIdle() {
+    if (state.closed || $("idle-box").hidden) return;
+    $("idle-off").hidden = !idle.enabled || !$("idle-confirm").hidden;
+    $("idle-on").hidden = idle.enabled;
+    if (!idle.enabled) {
+      $("idle").textContent = "Automatisches Beenden ist aus";
+      $("idle").classList.remove("warn");
+      $("idle-warn").hidden = true;
+      return;
+    }
+    const remaining = Math.max(0, Math.ceil((idle.deadline - Date.now()) / 1000));
+    const warn = remaining <= Math.min(120, idle.limit * 0.2);
+    $("idle").textContent = "Beendet sich automatisch in " + clock(remaining);
+    $("idle").classList.toggle("warn", warn);
+    $("idle-warn").hidden = !warn;
+  }
+
+  function applyIdle(reply) {
+    if (!reply || reply.ok !== true) return;
+    idle.enabled = Boolean(reply.enabled);
+    idle.limit = reply.limit;
+    if (idle.enabled && typeof reply.remaining === "number") {
+      const fromProgram = Date.now() + reply.remaining * 1000;
+      if (!idle.deadline || Math.abs(fromProgram - idle.deadline) > 2500) idle.deadline = fromProgram;
+    } else {
+      idle.deadline = 0;
+    }
+    $("idle-box").hidden = false;
+    renderIdle();
+  }
+
+  function closedByItself() {
+    state.closed = true;
+    state.hasResult = false;
+    clearError();
+    $("idle-warn").hidden = true;
+    $("closed-title").textContent = "Das Programm wurde automatisch beendet.";
+    $("closed-text").textContent = "Nach " + Math.round((idle.limit || 0) / 60) + " Minuten ohne Eingabe hat es sich selbst beendet. Zum Weiterarbeiten bitte das Programm neu starten.";
+    document.title = "Beendet";
+    show("view-closed");
+  }
+
+  async function pollIdle() {
+    idle.polled = Date.now();
+    const started = Date.now();
+    try {
+      const reply = await readReply(await fetch("status"));
+      if (started >= idle.lastActivity) applyIdle(reply);
+      idle.lost = false;
+    } catch (gone) {
+      if (!idle.lost && !state.closed) { idle.lost = true; showError(appError("E902")); }
+    }
+  }
+
+  async function confirmExpiry() {
+    if (idle.checking) return;
+    idle.checking = true;
+    try {
+      const reply = await readReply(await fetch("status"));
+      if (reply && reply.ok && !reply.enabled) { applyIdle(reply); return; }
+      if (reply && reply.ok && reply.remaining > 2) { idle.deadline = Date.now() + reply.remaining * 1000; return; }   // used from somewhere else
+    } catch (gone) {
+      // the program has already stopped
+    } finally {
+      idle.checking = false;
+    }
+    closedByItself();
+  }
+
+  async function sendActivity() {
+    idle.pending = null;
+    idle.lastSent = Date.now();
+    try { applyIdle(await readReply(await fetch("activity", { method: "POST" }))); } catch (gone) { /* shown by the next action */ }
+  }
+
+  function activity() {
+    if (state.closed) return;
+    idle.lastActivity = Date.now();
+    if (!idle.enabled) return;
+    idle.deadline = Date.now() + idle.limit * 1000;
+    renderIdle();
+    const wait = idle.lastSent + 5000 - Date.now();
+    if (wait <= 0) sendActivity();
+    else if (!idle.pending) idle.pending = setTimeout(sendActivity, wait);
+  }
+
+  async function setAutoStop(on) {
+    try {
+      const reply = await readReply(await fetch("autostop?on=" + (on ? "1" : "0"), { method: "POST" }));
+      idle.deadline = 0;
+      if (reply && reply.ok) applyIdle(reply); else showError(reply && reply.error ? reply.error : appError("E902"));
+    } catch (gone) {
+      showError(appError("E902"));
+    }
+  }
+
+  function tickIdle() {
+    if (state.closed) return;
+    renderIdle();
+    if (!idle.enabled || !idle.deadline) return;
+    if (idle.deadline - Date.now() <= 0) confirmExpiry();
+    else if (Date.now() - idle.polled >= 15000) pollIdle();
+  }
+
+  for (const type of ["pointerdown", "keydown", "wheel", "touchstart", "drop", "change", "scroll"]) {
+    window.addEventListener(type, activity, { capture: true, passive: true });
+  }
+  // Switching it off takes two clicks: the first only asks, the second does it.
+  $("idle-off").addEventListener("click", () => { $("confirm").hidden = true; $("idle-confirm").hidden = false; renderIdle(); $("idle-no").focus(); });
+  $("idle-no").addEventListener("click", () => { $("idle-confirm").hidden = true; renderIdle(); $("idle-off").focus(); });
+  $("idle-yes").addEventListener("click", async () => { $("idle-confirm").hidden = true; await setAutoStop(false); $("idle-on").focus(); });
+  $("idle-on").addEventListener("click", async () => { await setAutoStop(true); $("idle-off").focus(); });
+  setInterval(tickIdle, 1000);
+
   $("version").textContent = "Version " + catalog.version;
   show("view-form");
   render();
+  pollIdle();
 })();
 </script>
 </body>

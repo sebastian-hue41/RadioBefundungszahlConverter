@@ -12,7 +12,7 @@ Not collected by pytest: it needs Playwright and a browser, which are not depend
 Environment: BROWSER_EXECUTABLE = a Chromium-based browser to use instead of Playwright's own (for example
 Brave or Chrome). Everything is generated here (made-up workbooks) and kept in a temporary folder.
 """
-import atexit, base64, io, json, os, queue, shutil, subprocess, sys, tempfile, threading, time, zipfile
+import atexit, base64, io, json, os, queue, re, shutil, subprocess, sys, tempfile, threading, time, zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -74,6 +74,8 @@ stats_hint = put("statistik_hinweis.xlsx", stats_bytes(HINTROWS, **rows(HINTROWS
 only_n = put("statistik_nur_N.xlsx", stats_bytes(exams("NMRT", "NCT"), **rows(exams("NMRT", "NCT"))))
 evil = put("statistik_evil.xlsx", stats_bytes(MIXED, total_l8=len(MIXED), mitarbeiter='<img src=x onerror="window.__pwned=1"><b>fett</b>', befunddatum="01.01.2024-31.12.2024"))
 other_sections = put("map_andere_bereiche.xlsx", map_bytes(NRAD_CODES, sections=["DL Gefäße", "MRT", "Andere"]))
+targets = put("map_mit_zielen.xlsx", map_bytes([("RMRT", "MRT", {"MRT gesamt": 1}), ("RCT", "CT", {"CT": 1})], sections=["DL Gefäße", "MRT gesamt", "CT", "Mamma gesamt"]))
+evil_section = put("map_boese_bereiche.xlsx", map_bytes(ALLRAD_CODES, sections=["DL Gefäße", '<img src=x onerror="window.__pwned=1">', "CT"]))
 broken = put("kaputt.xlsx", b"this is not an excel file")
 dtd = put("statistik_dtd.xlsx", with_doctype(stats_bytes(MIXED, **rows(MIXED)), '<!DOCTYPE worksheet [<!ENTITY x "EINGESCHLEUST">]>'))
 big = f"{F}/gross.xlsx"
@@ -128,6 +130,31 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         check("result screen: title, who, what", "Auswertung fertig" in page.inner_text("#result-title") and page.inner_text("#result-who") == "ZUFALL_N · 01.04.2024 – 31.12.2024" and page.inner_text("#result-what") == "7 Leistungen · Allrad + NRAD", page.inner_text("#result-what"))
         check("the form is gone, the download button is the one main button", not visible(page, "#view-form") and visible(page, "#download"))
         check("no hints, no hints box", not visible(page, "#hints"))
+        # preview before the download
+        check("preview: a table is shown on the result screen, before the download", visible(page, "#preview") and visible(page, "#preview-table") and page.locator("#preview-body tr").count() >= 3)
+        shown = page.evaluate("[...document.querySelectorAll('#preview-head th')].map(th => th.textContent)")
+        check("preview: the columns are the ones of the Excel", shown[0] == "Leistungsbereich" and "Gesamt" in shown, str(shown))
+        preview_rows = page.evaluate("[...document.querySelectorAll('#preview-body tr')].map(tr => [...tr.cells].map(c => c.textContent))")
+        gesamt = shown.index("Gesamt")
+        check("preview: it shows the counts (MRT 4 and CT 4 for both maps)", any(r[0] == "MRT" and r[gesamt] == "4" for r in preview_rows) and any(r[0] == "CT" and r[gesamt] == "4" for r in preview_rows), str(preview_rows[:4]))
+        inside = page.evaluate("(() => { const w = document.getElementById('table-wrap').getBoundingClientRect(); return [...document.querySelectorAll('#preview-head th.total, #preview-head th.target')].map(th => { const r = th.getBoundingClientRect(); return r.left >= w.left - 1 && r.right <= w.right + 1; }); })()")
+        check("preview: Gesamt and Benötigt are inside the visible part of the table, not cut off", len(inside) == 2 and all(inside), str(inside))
+        check("preview: the first column stays visible when the table scrolls (sticky)", page.evaluate("getComputedStyle(document.querySelector('#preview-body th')).position") == "sticky")
+        all_rows = page.locator("#preview-body tr:visible").count()
+        page.check("#hide-empty")
+        fewer = page.locator("#preview-body tr:visible").count()
+        check("preview: 'Leere Zeilen ausblenden' hides rows without any value and says how many", fewer < all_rows and "leere Zeilen ausgeblendet" in page.inner_text("#preview-note") and not visible(page, "tr.empty-row"), f"{all_rows} -> {fewer}")
+        page.uncheck("#hide-empty"); check("preview: unticking shows every row again", page.locator("#preview-body tr:visible").count() == all_rows)
+        check("preview: the table can be reached and scrolled with the keyboard", page.evaluate("(() => { document.getElementById('table-wrap').focus(); return document.activeElement.id; })()") == "table-wrap")
+        shot(page, f"{S}/shot_preview.png")
+        # the red button
+        quit_style = page.evaluate("(() => { const b = getComputedStyle(document.getElementById('quit')); return [b.backgroundColor, b.color]; })()")
+        def rgb(text): return [int(x) for x in re.findall(r"\d+", text)[:3]]
+        def luminance(c): return sum(w * (v / 255 / 12.92 if v / 255 <= 0.03928 else ((v / 255 + 0.055) / 1.055) ** 2.4) for w, v in zip((0.2126, 0.7152, 0.0722), c))
+        bg, fg = rgb(quit_style[0]), rgb(quit_style[1]); ratio = (max(luminance(bg), luminance(fg)) + 0.05) / (min(luminance(bg), luminance(fg)) + 0.05)
+        check("'Server beenden' is red (light mode) with a readable text", bg[0] > 150 and bg[1] < 90 and bg[2] < 90 and ratio >= 4.5, f"{quit_style} contrast {ratio:.1f}")
+        box = page.locator("#quit").bounding_box()
+        check("'Server beenden' is a real button, not a quiet link (at least 120 x 36 px) and inside the window", box["width"] >= 120 and box["height"] >= 36 and box["y"] + box["height"] <= 1000, str(box))
         shot(page, f"{S}/shot_result.png")
         name = download(page, f"{F}/out_both.xlsx"); t = table(f"{F}/out_both.xlsx")
         check("download: name has the selection and the umlaut-free fallback is fine", name.endswith("_Allrad_NRAD.xlsx") and name.startswith("ZUFALL_N"), name)
@@ -140,6 +167,25 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         check("hints: closed until asked for", not pg.evaluate("document.getElementById('hints').open") and not visible(pg, "#hints-list"))
         pg.click("#hints-summary"); check("hints: the list shows code and text", pg.inner_text("#hints-list li") == "W201" + "1 Leistungscode fehlt in der Map (eigene Zeile in der Excel).".replace("", "") or pg.inner_text("#hints-list .code") == "W201", pg.inner_text("#hints-list"))
         check("hints: text is the catalog text", "fehlt in der Map" in pg.inner_text("#hints-list")); shot(pg, f"{S}/shot_hints.png"); pg.context.close()
+        # 1b2. many years in a narrow window: Gesamt and Benötigt stay visible while the years scroll
+        pg = new_page(b, app, viewport={"width": 380, "height": 900}); pick(pg, stats, allrad, nrad); pg.click("#submit"); pg.wait_for_selector("#view-result:not([hidden])")
+        pg.evaluate("document.getElementById('table-wrap').scrollLeft = 10000"); pg.evaluate("document.getElementById('table-wrap').scrollLeft = 0")
+        pos = pg.evaluate("(() => { const w = document.getElementById('table-wrap').getBoundingClientRect(); return [...document.querySelectorAll('#preview-head th.total, #preview-head th.target')].map(th => { const r = th.getBoundingClientRect(); return r.left >= w.left - 1 && r.right <= w.right + 1; }); })()")
+        check("preview: in a 380 px window Gesamt and Benötigt are visible too, and nothing makes the page scroll sideways", all(pos) and len(pos) == 2 and pg.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), str(pos)); pg.context.close()
+        # 1c. the colours of the Gesamt cell follow the share of the target
+        pg = new_page(b, app); pick(pg, stats, targets); pg.uncheck("#use-nrad"); pg.click("#submit"); pg.wait_for_selector("#view-result:not([hidden])")
+        gi = "[...document.querySelectorAll('#preview-head th')].findIndex(th => th.textContent === 'Gesamt')"
+        cells = pg.evaluate("(() => { const g = " + gi + "; return [...document.querySelectorAll('#preview-body tr')].filter(tr => tr.cells[0].textContent === 'MRT gesamt').map(tr => ({cls: tr.cells[g].className, text: [...tr.cells].map(c => c.textContent), title: tr.cells[g].title, bg: getComputedStyle(tr.cells[g]).backgroundColor})); })()")
+        check("preview: a total that is a small share of its target is shaded red, with the share in the tooltip", cells and "ach-red" in cells[0]["cls"] and cells[0]["title"] == "unter 1 % des Ziels" and cells[0]["bg"] != "rgba(0, 0, 0, 0)", str(cells))
+        zero = pg.evaluate("(() => { const g = " + gi + "; return [...document.querySelectorAll('#preview-body tr')].filter(tr => tr.cells[0].textContent === 'Mamma gesamt').map(tr => tr.cells[g].className); })()")
+        check("preview: a total of 0 is not shaded (as in the Excel)", zero and "ach-" not in zero[0], str(zero))
+        wide = pg.evaluate("document.getElementById('card').classList.contains('wide')")
+        check("the result screen is wider than the form (room for the table)", wide)
+        check("preview: it says what the colours mean when there are targets", "grün ab 100 %" in pg.inner_text("#preview-note")); pg.context.close()
+        # 1d. markup in a section name
+        pg = new_page(b, app); pick(pg, stats, evil_section); pg.uncheck("#use-nrad"); pg.click("#submit"); pg.wait_for_selector("#view-result:not([hidden])")
+        names = pg.evaluate("[...document.querySelectorAll('#preview-body th')].map(th => th.textContent)")
+        check("preview: markup in a section name is shown as plain text and nothing runs", any("<img src=x" in n for n in names) and pg.locator("#preview img").count() == 0 and pg.evaluate("window.__pwned") is None and csp(pg) == [], str(names[:3])); pg.context.close()
         # 2. Weitere Statistik
         page.click("#again"); check("'Weitere Statistik' returns to the form", visible(page, "#view-form") and not visible(page, "#view-result"))
         check("... clears only the statistics file", page.inner_text("#text-statistics").startswith("Datei wählen") and page.inner_text("#text-allrad") == "✓ map_allrad.xlsx" and page.inner_text("#text-nrad") == "✓ map_nrad.xlsx")

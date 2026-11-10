@@ -125,7 +125,96 @@ class TestSelections:
     def test_the_summary_carries_what_the_page_shows(self):
         summary = evaluate(make_files(mitarbeiter="ZUFALL_N", befunddatum="01.04.2024-31.12.9999")).summary
         assert summary["mitarbeiter"] == "ZUFALL_N" and summary["befunddatum"] == "01.04.2024-31.12.9999"
-        assert set(summary) == {"filename", "mitarbeiter", "befunddatum", "total_counted", "selection", "selection_label", "hints"}
+        assert set(summary) == {"filename", "mitarbeiter", "befunddatum", "total_counted", "selection", "selection_label", "hints", "preview"}
+
+
+def excel_table(evaluation):
+    """(header, rows) of the main table, read back from the finished Excel."""
+    ws = sheet(evaluation)
+    rows = [list(row) for row in ws.iter_rows(values_only=True)]
+    header = [v for v in rows[0]]
+    while header and header[-1] is None:
+        header.pop()
+    body = []
+    for row in rows[1:]:
+        if row[0] is None or str(row[0]).startswith("Gezählte"):
+            break
+        body.append(row[: len(header)])
+    return header, body
+
+
+class TestPreview:
+    """The table the page shows before the download is the table of the Excel itself."""
+
+    @pytest.mark.parametrize("allrad, nrad", [(True, False), (False, True), (True, True)])
+    def test_it_is_the_table_of_the_excel_for_every_selection(self, allrad, nrad):
+        result = evaluate(make_files(allrad=allrad, nrad=nrad), reference_data=load_reference_data(REFERENCE))
+        header, body = excel_table(result)
+        assert result.summary["preview"]["columns"] == header
+        assert result.summary["preview"]["rows"] == [list(row) for row in body]
+
+    def test_the_total_and_the_target_column_are_named_by_their_position(self):
+        preview = evaluate(make_files(), reference_data=load_reference_data(REFERENCE)).summary["preview"]
+        assert preview["columns"][preview["total_column"]] == "Gesamt" and preview["columns"][preview["target_column"]] == "Benötigt"
+        assert preview["columns"][0] == "Leistungsbereich" and preview["columns"][1] == "2024"
+
+    def test_without_reference_data_there_is_no_target_column(self):
+        preview = evaluate(make_files()).summary["preview"]
+        assert preview["target_column"] is None and "Benötigt" not in preview["columns"] and preview["total_column"] is not None
+
+    def test_numbers_stay_numbers_and_blanks_are_none(self):
+        preview = evaluate(make_files(), reference_data=load_reference_data(REFERENCE)).summary["preview"]
+        rows = {row[0]: row for row in preview["rows"]}
+        assert rows["MRT"][1] == 4 and rows["MRT"][preview["total_column"]] == 4 and isinstance(rows["MRT"][1], int)
+        assert all(row[preview["target_column"]] is None or isinstance(row[preview["target_column"]], int) for row in preview["rows"])
+
+    def test_a_target_from_the_reference_file_arrives_next_to_the_total(self):
+        preview = evaluate(make_files(), reference_data=load_reference_data(REFERENCE)).summary["preview"]
+        assert {row[0]: row[preview["target_column"]] for row in preview["rows"]}["MRT"] == 100          # REFERENCE: {"MRT": 100}
+
+    def test_a_combination_row_of_the_reference_file_is_in_it(self):
+        reference = load_reference_data(wb_to_bytes(make_reference_wb({"MRT": 100, "CT": 50}, combinations={"MRT und CT": ["MRT", "CT"]})))
+        preview = evaluate(make_files(), reference_data=reference).summary["preview"]
+        assert {row[0]: row[preview["total_column"]] for row in preview["rows"]}["MRT und CT"] == 4 + 4
+
+    def test_rows_that_are_not_in_the_map_are_in_it_as_in_the_excel(self):
+        preview = evaluate(make_files(exams("RMRT", "RUNBEKANNT"), nrad=False)).summary["preview"]
+        assert "Text RUNBEKANNT" in [row[0] for row in preview["rows"]]
+
+    def test_nothing_below_the_table_is_in_it(self):
+        text = json.dumps(evaluate(make_files(), names={ALLRAD: "geheim.xlsx", NRAD: "auch.xlsx"}, reference_data=load_reference_data(REFERENCE)).summary["preview"])
+        for needle in ("Gezählte", "AUSWAHL", "Hinweise und Fehler", "geheim", "auch.xlsx", "Befunddokumente"):
+            assert needle not in text
+
+    def test_a_section_name_with_markup_stays_plain_text(self):
+        evil = '<img src=x onerror="alert(1)">'
+        files = make_files(nrad=False)
+        files[ALLRAD] = map_bytes(ALLRAD_CODES, sections=["DL Gefäße", evil, "CT"])
+        result = evaluate(files)
+        assert evil in [row[0] for row in result.summary["preview"]["rows"]]
+        assert all(isinstance(v, (str, int, float, type(None))) for row in result.summary["preview"]["rows"] for v in row)
+
+    def test_a_long_name_is_clipped(self):
+        files = make_files(nrad=False)
+        files[ALLRAD] = map_bytes(ALLRAD_CODES, sections=["DL Gefäße", "M" * 500, "CT"])
+        names = [row[0] for row in evaluate(files).summary["preview"]["rows"]]
+        assert max(len(n) for n in names) <= 100
+
+    def test_the_number_of_rows_is_limited(self, monkeypatch):
+        monkeypatch.setattr(server, "_PREVIEW_MAX_ROWS", 2)
+        assert len(evaluate(make_files()).summary["preview"]["rows"]) == 2
+
+    def test_the_number_of_columns_is_limited(self, monkeypatch):
+        monkeypatch.setattr(server, "_PREVIEW_MAX_COLUMNS", 2)
+        preview = evaluate(make_files()).summary["preview"]
+        assert len(preview["columns"]) == 2 and preview["total_column"] is None and all(len(row) == 2 for row in preview["rows"])
+
+    def test_it_does_not_change_the_download(self):
+        result = evaluate(make_files(), reference_data=load_reference_data(REFERENCE))
+        assert openpyxl.load_workbook(io.BytesIO(result.data)).active.max_row > 5 and result.data[:2] == b"PK"
+
+    def test_it_is_small(self):
+        assert len(json.dumps(evaluate(make_files(), reference_data=load_reference_data(REFERENCE)).summary)) < 20_000
 
 
 class TestFileNames:
@@ -1244,7 +1333,7 @@ class TestEvaluateAndDownload:
     def test_the_server_keeps_no_upload(self, app):
         post_files(app, make_files())
         held = app.state.get_result()
-        assert isinstance(held, Evaluation) and set(vars(app.state)) == {"reference_data", "page_html", "busy", "_lock", "_result", "_closed"}
+        assert isinstance(held, Evaluation) and set(vars(app.state)) == {"reference_data", "page_html", "busy", "_lock", "_result", "_closed", "idle_seconds", "_auto_stop_seconds", "_clock", "_last_activity", "expired"}
         assert not any(isinstance(v, (bytes, bytearray)) and len(v) > 0 and v is not held.data for v in vars(held).values())
 
 
@@ -1505,3 +1594,275 @@ class TestShutdown:
         thread.start()
         call(s, "POST", at(s, "shutdown"))
         assert done.wait(5)
+
+
+# ── Stopping by itself after a while without use ───────────────────────────────
+
+class Clock:
+    """A clock the tests move by hand, so that thirty minutes take no time."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+def start(idle_seconds=60, clock=None):
+    srv = create_server(load_reference_data(REFERENCE), idle_seconds=idle_seconds, clock=clock or time.monotonic)
+    thread = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+    thread.start()
+    srv.thread = thread
+    return srv
+
+
+def stop_server(srv):
+    srv.shutdown()
+    srv.server_close()
+    srv.thread.join(5)
+
+
+@pytest.fixture
+def timed():
+    """(server that stops by itself after 60 'seconds', the clock that drives it)"""
+    clock = Clock()
+    srv = start(60, clock)
+    yield srv, clock
+    stop_server(srv)
+
+
+def status(srv):
+    return call(srv, "GET", at(srv, "status")).json
+
+
+def stopped(srv, seconds=5):
+    srv.thread.join(seconds)
+    return not srv.thread.is_alive()
+
+
+class TestTheClockOfTheProgram:
+
+    def test_the_time_left_runs_down_and_using_it_starts_it_again(self):
+        clock = Clock()
+        state = server._State(None, "x{{NONCE}}", 100, clock)
+        assert state.remaining() == 100
+        clock.advance(30)
+        assert state.remaining() == 70
+        state.mark_used()
+        assert state.remaining() == 100
+        clock.advance(500)
+        assert state.remaining() == 0                                   # never negative
+
+    def test_without_a_limit_it_never_runs_out(self):
+        for none in (None, 0):
+            state = server._State(None, "x", none, Clock())
+            assert state.remaining() is None and state.idle_seconds is None
+
+    def test_a_negative_limit_is_refused(self):
+        with pytest.raises(ValueError):
+            create_server(idle_seconds=-1)
+
+    def test_switching_it_off_and_on(self):
+        clock = Clock()
+        state = server._State(None, "x", 100, clock)
+        state.set_auto_stop(False)
+        clock.advance(10_000)
+        assert state.remaining() is None
+        state.set_auto_stop(True)
+        assert state.remaining() == 100                                  # on again with the time it was started with
+
+    def test_started_without_a_limit_it_can_be_switched_on_with_the_default(self):
+        state = server._State(None, "x", None, Clock())
+        state.set_auto_stop(True)
+        assert state.idle_seconds == server.IDLE_SECONDS == 1800
+
+
+class TestStatusAndActivity:
+
+    def test_status_says_how_much_time_is_left(self, timed):
+        srv, clock = timed
+        assert status(srv) == {"ok": True, "enabled": True, "limit": 60, "remaining": 60}
+
+    def test_asking_does_not_use_the_time_up_or_extend_it(self, timed):
+        srv, clock = timed
+        clock.advance(20)
+        assert status(srv)["remaining"] == 40
+        clock.advance(10)
+        assert status(srv)["remaining"] == 30                            # asking twice changed nothing
+
+    def test_a_limit_that_is_not_a_whole_number_of_seconds_is_rounded_up_too(self):
+        srv = start(1.5)
+        try:
+            reply = status(srv)
+            assert reply["limit"] == 2 and isinstance(reply["limit"], int) and isinstance(reply["remaining"], int)
+        finally:
+            stop_server(srv)
+
+    def test_the_time_is_rounded_up_to_whole_seconds(self, timed):
+        srv, clock = timed
+        clock.advance(0.2)
+        assert status(srv)["remaining"] == 60 and isinstance(status(srv)["remaining"], int)
+
+    @pytest.mark.parametrize("method, route, body", [
+        ("GET", "", None), ("GET", "download", None), ("POST", "reset", b""), ("POST", "activity", b""),
+        ("POST", "autostop?on=1", b""), ("POST", "evaluate", b"x"),
+    ])
+    def test_every_request_that_passed_the_checks_counts_as_use(self, timed, method, route, body):
+        srv, clock = timed
+        clock.advance(30)
+        assert status(srv)["remaining"] == 30
+        call(srv, method, at(srv, route), body)
+        assert status(srv)["remaining"] == 60
+
+    def test_the_activity_request_answers_with_the_new_time(self, timed):
+        srv, clock = timed
+        clock.advance(40)
+        assert call(srv, "POST", at(srv, "activity")).json["remaining"] == 60
+
+    @pytest.mark.parametrize("what", ["wrong token", "wrong host", "foreign origin", "cross-site", "wrong method", "unknown route", "no token"])
+    def test_a_refused_request_never_counts_as_use(self, timed, what):
+        srv, clock = timed
+        clock.advance(30)
+        calls = {
+            "wrong token": lambda: call(srv, "POST", f"/{srv.token[:-1]}x/activity"),
+            "wrong host": lambda: call(srv, "POST", at(srv, "activity"), host="evil.example"),
+            "foreign origin": lambda: call(srv, "POST", at(srv, "activity"), headers={"Origin": "http://evil.example"}),
+            "cross-site": lambda: call(srv, "POST", at(srv, "activity"), headers={"Sec-Fetch-Site": "cross-site"}),
+            "wrong method": lambda: call(srv, "GET", at(srv, "activity")),
+            "unknown route": lambda: call(srv, "POST", at(srv, "nope")),
+            "no token": lambda: call(srv, "POST", "/activity"),
+        }
+        assert calls[what]().status in (403, 404, 405)
+        assert status(srv)["remaining"] == 30                            # so no other site can keep the program running
+
+    def test_status_and_the_others_carry_the_security_headers(self, timed):
+        srv, _ = timed
+        for route, method in (("status", "GET"), ("activity", "POST"), ("autostop?on=1", "POST")):
+            assert_secure_headers(call(srv, method, at(srv, route)))
+
+    def test_no_idle_limit_means_no_remaining_time(self):
+        srv = start(None)
+        try:
+            assert status(srv) == {"ok": True, "enabled": False, "limit": None, "remaining": None}
+        finally:
+            stop_server(srv)
+
+
+class TestItStopsByItself:
+
+    def test_not_before_the_time_is_up(self, timed):
+        srv, clock = timed
+        clock.advance(59)
+        time.sleep(0.3)
+        assert srv.thread.is_alive() and srv.state.expired is False
+
+    def test_when_the_time_is_up_it_stops_closes_the_port_and_forgets_the_result(self, timed):
+        srv, clock = timed
+        post_files(srv, make_files())
+        assert srv.state.get_result() is not None
+        clock.advance(61)
+        assert stopped(srv)
+        assert srv.state.expired is True and srv.state.get_result() is None
+        assert port_refuses_connections(srv.port)
+
+    def test_use_keeps_it_going(self, timed):
+        srv, clock = timed
+        for _ in range(6):
+            clock.advance(50)
+            time.sleep(0.1)
+            assert srv.thread.is_alive()
+            assert call(srv, "POST", at(srv, "activity")).status == 200
+        clock.advance(61)
+        assert stopped(srv)
+
+    def test_only_a_real_use_keeps_it_going(self, timed):
+        srv, clock = timed
+        clock.advance(40)
+        call(srv, "POST", at(srv, "activity"), host="evil.example")      # refused
+        status(srv)                                                       # asking
+        clock.advance(25)
+        assert stopped(srv)
+
+    def test_never_while_an_evaluation_runs_but_afterwards(self, timed, monkeypatch):
+        srv, clock = timed
+        blocked = BlockedEvaluation(monkeypatch)
+        thread, answer = blocked.start(srv)
+        clock.advance(600)                                                # long past the limit
+        time.sleep(0.3)
+        assert srv.thread.is_alive() and not srv.state.expired
+        blocked.release.set()
+        thread.join(10)
+        assert answer[0].status == 200
+        assert stopped(srv)                                               # the evaluation finished: now it stops
+
+    def test_it_stops_only_once(self, timed, monkeypatch):
+        srv, clock = timed
+        calls = []
+        monkeypatch.setattr(srv, "shutdown_soon", lambda: calls.append(1))
+        clock.advance(100)
+        time.sleep(0.4)
+        assert calls == [1]
+
+    def test_with_the_real_clock(self):
+        srv = start(1.0)
+        try:
+            assert srv.thread.is_alive()
+            assert stopped(srv, 5)
+        finally:
+            srv.server_close()
+
+    def test_with_the_real_clock_use_keeps_it_going(self):
+        srv = start(1.0)
+        try:
+            end = time.time() + 2.5
+            while time.time() < end:
+                assert call(srv, "POST", at(srv, "activity")).status == 200
+                time.sleep(0.3)
+            assert srv.thread.is_alive()
+            assert stopped(srv, 5)
+        finally:
+            srv.server_close()
+
+
+class TestSwitchingItOff:
+
+    def test_off_stays_off_however_long_nobody_uses_it(self, timed):
+        srv, clock = timed
+        reply = call(srv, "POST", at(srv, "autostop?on=0")).json
+        assert reply == {"ok": True, "enabled": False, "limit": None, "remaining": None}
+        clock.advance(100_000)
+        time.sleep(0.3)
+        assert srv.thread.is_alive() and status(srv)["enabled"] is False
+
+    def test_on_again_starts_the_time_again(self, timed):
+        srv, clock = timed
+        call(srv, "POST", at(srv, "autostop?on=0"))
+        clock.advance(500)
+        assert call(srv, "POST", at(srv, "autostop?on=1")).json == {"ok": True, "enabled": True, "limit": 60, "remaining": 60}
+        clock.advance(61)
+        assert stopped(srv)
+
+    def test_a_program_started_without_a_limit_gets_the_default_when_switched_on(self):
+        srv = start(None)
+        try:
+            assert call(srv, "POST", at(srv, "autostop?on=1")).json == {"ok": True, "enabled": True, "limit": 1800, "remaining": 1800}
+        finally:
+            stop_server(srv)
+
+    @pytest.mark.parametrize("query", ["", "?on=2", "?on=yes", "?on=", "?off=1", "?on=0&on=1x", "?" + "&".join(f"a{i}=1" for i in range(20))])
+    def test_anything_but_0_or_1_is_refused_and_changes_nothing(self, timed, query):
+        srv, _ = timed
+        response = call(srv, "POST", at(srv, "autostop") + query)
+        assert response.status == 400 and response.error["code"] == "E304"
+        assert status(srv)["enabled"] is True
+
+    def test_the_switch_needs_post_the_token_and_our_own_origin(self, timed):
+        srv, _ = timed
+        assert call(srv, "GET", at(srv, "autostop?on=0")).status == 405
+        assert call(srv, "POST", f"/wrong/autostop?on=0").status == 404
+        assert call(srv, "POST", at(srv, "autostop?on=0"), headers={"Origin": "http://evil.example"}).status == 403
+        assert call(srv, "POST", at(srv, "autostop?on=0"), host="evil.example").status == 403
+        assert status(srv)["enabled"] is True

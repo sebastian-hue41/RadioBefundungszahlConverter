@@ -146,10 +146,25 @@ class TestWhatThePageOffers:
         assert tags("html")[0]["lang"] == "de" and len(tags("h1")) == 1
         assert "Befundungszahlen auswerten" in PAGE
 
-    def test_the_two_checkboxes_both_ticked_to_start_with(self):
+    def test_the_two_department_checkboxes_both_ticked_to_start_with(self):
         boxes = {attrs["id"]: attrs for attrs in tags("input") if attrs.get("type") == "checkbox"}
-        assert set(boxes) == {"use-allrad", "use-nrad"}
-        assert all("checked" in attrs for attrs in boxes.values())
+        assert set(boxes) == {"use-allrad", "use-nrad", "hide-empty"}
+        assert "checked" in boxes["use-allrad"] and "checked" in boxes["use-nrad"]
+        assert "checked" not in boxes["hide-empty"]                              # the preview shows every row of the Excel at first
+
+    def test_the_preview_is_a_labelled_scrollable_table_that_the_keyboard_can_reach(self):
+        region = next(attrs for attrs in tags("div") if attrs.get("id") == "table-wrap")
+        assert region["tabindex"] == "0" and region["role"] == "region" and region["aria-labelledby"] == "preview-title"
+        assert [attrs["id"] for attrs in tags("table")] == ["preview-table"]
+        assert any(attrs.get("for") == "hide-empty" for attrs in tags("label"))
+        assert "Vorschau" in PAGE and "Leere Zeilen ausblenden" in PAGE
+
+    def test_the_quit_button_is_red_and_the_confirmation_too(self):
+        buttons = {attrs["id"]: attrs for attrs in tags("button")}
+        assert "danger" in buttons["quit"]["class"].split() and "danger" in buttons["quit-yes"]["class"].split()
+        css = "".join(PARSED.styles)
+        assert re.search(r"\.danger\s*\{[^}]*background:\s*var\(--danger\)", css) and "--danger:" in css and ".danger:focus-visible" in css
+        assert "danger" not in buttons["quit-no"].get("class", "")                 # 'Abbrechen' stays neutral
 
     def test_three_file_pickers_that_only_offer_xlsx(self):
         pickers = [attrs for attrs in tags("input") if attrs.get("type") == "file"]
@@ -159,7 +174,7 @@ class TestWhatThePageOffers:
 
     def test_all_the_buttons_exist_and_none_submits_by_accident(self):
         buttons = {attrs["id"]: attrs for attrs in tags("button")}
-        assert set(buttons) == {"submit", "download", "again", "quit", "quit-yes", "quit-no"}
+        assert set(buttons) == {"submit", "download", "again", "quit", "quit-yes", "quit-no", "idle-off", "idle-on", "idle-yes", "idle-no"}
         assert all(attrs.get("type") in ("submit", "button") for attrs in buttons.values())
         assert [i for i, attrs in buttons.items() if attrs["type"] == "submit"] == ["submit"]
         assert "disabled" in buttons["submit"]                                  # nothing to evaluate before files are chosen
@@ -236,7 +251,7 @@ class TestPageAndServerAgree:
         assert 'fetch("reset", { method: "POST" })' in script and 'fetch("shutdown", { method: "POST" })' in script
         assert 'fetch("download")' in script
         for route, methods in _Handler._ROUTES.items():
-            expected = "GET" if route in ("/", "/download") else "POST"
+            expected = "GET" if route in ("/", "/download", "/status") else "POST"
             assert methods == {expected: methods[expected]}
 
     def test_the_file_slots_are_the_servers_slots(self):
@@ -274,6 +289,20 @@ class TestPageAndServerAgree:
         read = set(re.findall(r"\bsummary\.(\w+)", main_script())) - {"hints"}
         assert read and read <= set(summary), read - set(summary)
         assert "hints" in summary
+
+    def test_the_fields_of_the_preview_that_the_page_reads_exist(self):
+        preview = evaluate(make_files(), reference_data=load_reference_data(REFERENCE)).summary["preview"]
+        read = set(re.findall(r"\bpreview\.(\w+)", main_script()))
+        assert read == {"columns", "rows", "total_column", "target_column"} and read <= set(preview)
+
+    def test_the_colours_of_the_total_follow_the_excel(self):
+        from core import output_handler
+        script, css = main_script(), "".join(PARSED.styles)
+        assert "ratio >= 1 ?" in script and "ratio >= 0.8 ?" in script and "ratio >= 0.5 ?" in script        # the thresholds of _add_achievement_cf
+        for formula in ("{gf}/{bf}>=1", "{gf}/{bf}>=0.8", "{gf}/{bf}>=0.5", "{gf}/{bf}>0"):
+            assert formula in open(output_handler.__file__, encoding="utf-8").read()
+        for name, colour in (("green", output_handler._ACH_GREEN), ("yellow", output_handler._ACH_YELLOW), ("red", output_handler._ACH_RED)):
+            assert f"--ach-{name}: #{colour.lower()}" in css                                           # the light colours are the Excel's
 
     def test_the_hint_fields_the_page_reads_exist(self):
         from .test_server import exams
@@ -335,3 +364,91 @@ class TestCatalog:
     def test_nothing_of_the_placeholders_is_left(self, app):
         html = served_page(app)
         assert "{{NONCE}}" not in html and "{{CATALOG}}" not in html
+
+
+# ── Stopping by itself: the counter and the two-click switch ───────────────────
+
+def handler(element_id):
+    """The source of the click handler of one button (every one is a single line)."""
+    match = re.search(rf'\$\("{element_id}"\)\.addEventListener\("click", (.*)\);', main_script())
+    assert match, element_id
+    return match.group(1)
+
+
+class TestStoppingByItself:
+
+    def test_the_counter_the_warning_and_the_switch_are_in_the_page_and_start_hidden(self):
+        elements = {attrs["id"]: attrs for _, attrs in PARSED.elements if "id" in attrs}
+        for name in ("idle-box", "idle-confirm", "idle-on", "idle-warn"):
+            assert "hidden" in elements[name], name
+        assert "hidden" not in elements["idle-off"] and "hidden" not in elements["idle"]            # shown as soon as the box is
+        assert elements["idle"]["role"] == "timer" and elements["idle-warn"]["role"] == "alert" and elements["idle-confirm"]["role"] == "alert"
+
+    def test_the_texts_the_user_reads(self):
+        for text in ("Beendet sich automatisch in", "Automatisches Beenden ausschalten", "Automatisches Beenden einschalten", "Automatisches Beenden ist aus",
+                     "Das Programm beendet sich dann nicht mehr von selbst. Wirklich ausschalten?", "Ja, ausschalten", "Das Programm wurde automatisch beendet.",
+                     "Das Programm beendet sich bald von selbst. Jede Eingabe verlängert die Zeit."):
+            assert text in PAGE, text
+
+    def test_switching_it_off_takes_two_clicks_the_first_only_asks(self):
+        first = handler("idle-off")
+        assert "fetch" not in first and "setAutoStop" not in first                      # the first click sends nothing ...
+        assert '$("idle-confirm").hidden = false' in first and '$("idle-no").focus()' in first      # ... it asks, with the safe button focused
+        assert "setAutoStop(false)" in handler("idle-yes")                              # the second click does it
+        assert main_script().count("setAutoStop(false)") == 1                           # and nothing else can
+        assert len(re.findall(r'fetch\("autostop', main_script())) == 1
+
+    def test_cancelling_sends_nothing_and_switching_on_again_is_one_click(self):
+        assert "fetch" not in handler("idle-no") and "setAutoStop" not in handler("idle-no")
+        assert "setAutoStop(true)" in handler("idle-on")
+
+    def test_the_confirmation_of_the_quit_button_and_this_one_never_show_together(self):
+        assert '$("confirm").hidden = true' in handler("idle-off")
+        assert '$("idle-confirm").hidden = true' in re.search(r'\$\("quit"\)\.addEventListener\("click", \(\) => \{.*?\n  \}\);', main_script(), re.S).group(0)
+
+    def test_asking_for_the_time_left_is_only_a_read_the_use_is_reported_separately(self):
+        script = main_script()
+        assert 'fetch("status")' in script and 'fetch("status", {' not in script       # a plain GET: it must not count as use
+        assert 'fetch("activity", { method: "POST" })' in script
+
+    def test_the_events_that_count_as_use(self):
+        events = re.search(r"for \(const type of \[(.*?)\]\) \{\s*window\.addEventListener\(type, activity", main_script(), re.S).group(1)
+        assert {e.strip(' "') for e in events.split(",")} == {"pointerdown", "keydown", "wheel", "touchstart", "drop", "change", "scroll"}
+        assert "mousemove" not in main_script()                                          # a mouse resting on the page is not use
+
+    def test_the_fields_of_the_replies_the_page_reads_exist(self):
+        from local_app.errors import AppError
+        read = set(re.findall(r"\breply\.(\w+)", main_script()))
+        reply = {"ok", "error", "enabled", "limit", "remaining", "summary"}
+        assert read <= reply, read - reply
+        payload = set(evaluate_status_payload())
+        assert {"enabled", "limit", "remaining"} <= payload and {"enabled", "limit", "remaining", "ok"} == payload
+
+    def test_the_counter_shows_minutes_and_two_digit_seconds(self):
+        assert 'Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0")' in main_script()      # 29:05, not 29:5
+
+    def test_the_warning_comes_in_the_last_fifth_of_the_time_but_at_most_two_minutes(self):
+        assert "Math.min(120, idle.limit * 0.2)" in main_script()
+
+    def test_the_closed_by_itself_screen_names_the_time(self):
+        assert 'Math.round((idle.limit || 0) / 60) + " Minuten ohne Eingabe' in main_script()
+
+    def test_a_status_that_says_the_program_is_about_to_stop_closes_the_page_but_one_that_says_it_is_used_elsewhere_does_not(self):
+        script = main_script()
+        assert "reply.remaining > 2" in script and "closedByItself();" in script
+
+    def test_the_counter_ticks_every_second_and_polls_the_program_only_every_fifteen(self):
+        script = main_script()
+        assert "setInterval(tickIdle, 1000)" in script and ">= 15000" in script and "idle.lastSent + 5000" in script
+
+
+def evaluate_status_payload():
+    srv = server.create_server()
+    try:
+        thread = threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+        thread.start()
+        return call(srv, "GET", at(srv, "status")).json
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(5)

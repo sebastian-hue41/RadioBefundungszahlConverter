@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 import threading
@@ -24,6 +25,7 @@ from pathlib import Path
 
 # Absolute imports: PyInstaller runs this file as a script, where relative ones fail.
 from core.input_handler import load_reference_data
+from local_app import server as server_module
 from local_app.server import AppServer, bundle_dir, create_server
 
 REFERENCE_NAME = "reference_amount.xlsx"
@@ -99,6 +101,8 @@ def _parser() -> argparse.ArgumentParser:
         description="Local app: evaluate a staff statistics file against the Leistungen maps in the browser.",
     )
     parser.add_argument("--no-browser", action="store_true", help="do not open the browser; only print the address")
+    parser.add_argument("--idle-minutes", type=float, default=server_module.IDLE_SECONDS / 60, metavar="N",
+                        help="stop by itself after N minutes without use (default 30; 0 = never)")
     return parser
 
 
@@ -112,7 +116,10 @@ def main(
     Run the app until it is stopped. Returns the exit code: 0 after a normal stop (the button
     or Ctrl+C), 1 if it could not start. `opener` and `on_ready(server)` exist for the tests.
     """
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.idle_minutes) or args.idle_minutes < 0:
+        parser.error("--idle-minutes must be a number, 0 or more")
     # core logs what it could not use, with file paths. Nothing of that belongs on the console of the app:
     # the reasons are on the sheet of the Excel and in the hints of the page.
     if not any(isinstance(handler, logging.NullHandler) for handler in logging.getLogger("core").handlers):
@@ -120,7 +127,7 @@ def main(
 
     reference = load_reference(reference_path())
     try:
-        server = create_server(reference)
+        server = create_server(reference, idle_seconds=args.idle_minutes * 60)
     except (OSError, ValueError) as exc:
         say(f"Could not start the app: {type(exc).__name__}. Is the program complete? "
             "Please report this message.")
@@ -129,6 +136,8 @@ def main(
     say("")
     say(f"Befundungszahlen app is running at: {server.url}")
     say("Keep this window open while you work. To stop, use the 'Server beenden' button or press Ctrl+C.")
+    if args.idle_minutes:
+        say(f"It also stops by itself after {args.idle_minutes:g} minutes without use.")
     say("")
     if not args.no_browser:
         restore_library_path()
@@ -141,7 +150,10 @@ def main(
         say("Stopped (Ctrl+C).")
     finally:
         server.server_close()
-    say("The app has stopped. You can close this window.")
+    if server.state.expired:
+        say(f"The app stopped by itself after {args.idle_minutes:g} minutes without use. You can close this window.")
+    else:
+        say("The app has stopped. You can close this window.")
     return 0
 
 

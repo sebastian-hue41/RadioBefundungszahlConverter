@@ -211,6 +211,10 @@ def run(path):
                   status == 200 and xlsx[:2] == b"PK" and zipfile.ZipFile(io.BytesIO(xlsx)).testzip() is None and all(table.get(k) == v for k, v in numbers.items())
                   and suffix in headers["content-disposition"], f"{status} {table} {headers.get('content-disposition')}")
             check(f"{label}: the bundled reference file is used (Benötigt column)", "Benötigt" in header)
+            preview = reply["summary"].get("preview") or {}
+            check(f"{label}: the preview shown before the download is the table of the Excel",
+                  preview.get("columns") == [h for h in header if h is not None] and len(preview.get("rows", [])) == len(table)
+                  and {row[0]: row[preview["columns"].index("Gesamt")] for row in preview["rows"]} == table, str(preview)[:200])
         status, headers, data = program.call("POST", "reset")
         check("reset works: the result is gone", status == 200 and program.call("GET", "download")[0] == 404 and json.loads(program.call("GET", "download")[2])["error"]["code"] == "E901")
 

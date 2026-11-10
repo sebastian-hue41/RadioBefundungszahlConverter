@@ -21,17 +21,22 @@ from the statistics beyond that); it deletes it right away.
 from __future__ import annotations
 
 import hmac
+import io
 import json
+import math
 import re
 import secrets
 import socketserver
 import sys
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, quote
+
+import openpyxl
 
 from core.input_handler import MAX_FILE_SIZE_MB, load_map, load_statistics
 from core.logic import process
@@ -59,6 +64,9 @@ from .security import assert_no_formulas, safe_name, scan_xlsx
 
 _SELECTION_LABELS = {ALLRAD: "Allrad", NRAD: "NRAD"}
 _MAX_SHOWN = 100   # longest text from a file (staff name, dates) passed on to the page
+IDLE_SECONDS = 30 * 60   # the program stops by itself after this long without use
+_PREVIEW_MAX_ROWS = 500
+_PREVIEW_MAX_COLUMNS = 40
 
 # The upload is one request: the files back to back, their sizes in the URL.
 #   ?stats=<bytes>&allrad=<bytes>&nrad=<bytes>&allrad_name=<text>&nrad_name=<text>
@@ -105,6 +113,41 @@ def _shown(text) -> str | None:
         return None
     text = str(text)
     return text if len(text) <= _MAX_SHOWN else text[: _MAX_SHOWN - 1] + "…"
+
+
+def _preview_value(value):
+    """A cell of the table for the page: numbers stay numbers, text is clipped, nothing else is passed on."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    return _shown(value)
+
+
+def _preview(xlsx: bytes) -> dict:
+    """
+    The main table of the finished Excel (sections by years, Gesamt, Benötigt), read back from the file itself so
+    that the page shows exactly what the download contains. Only the table: no notes, no names of files.
+    """
+    workbook = openpyxl.load_workbook(io.BytesIO(xlsx), read_only=True, data_only=True)
+    try:
+        rows = workbook.active.iter_rows(values_only=True, max_col=_PREVIEW_MAX_COLUMNS)
+        columns = [_preview_value(value) for value in next(rows)]
+        while columns and columns[-1] is None:
+            columns.pop()
+        body = []
+        for row in rows:
+            if row[0] is None or str(row[0]).startswith("Gezählte") or len(body) >= _PREVIEW_MAX_ROWS:
+                break
+            body.append([_preview_value(value) for value in row[: len(columns)]])
+    finally:
+        workbook.close()
+    return {
+        "columns": columns,
+        "rows": body,
+        "total_column": columns.index("Gesamt") if "Gesamt" in columns else None,
+        "target_column": columns.index("Benötigt") if "Benötigt" in columns else None,
+    }
 
 
 def _file_name(core_name: str, selection: list[str]) -> str:
@@ -218,6 +261,7 @@ def _evaluate(files: dict[str, bytes], names: Mapping[str, str], reference_data:
         "selection": list(maps),
         "selection_label": label,
         "hints": sorted(hints, key=lambda h: h["code"]),
+        "preview": _preview(data),
     }
     return Evaluation(filename, data, summary)
 
@@ -348,13 +392,35 @@ def _load_page() -> str:
 class _State:
     """What the server remembers: the latest result (one slot) and whether it is shutting down."""
 
-    def __init__(self, reference_data: dict | None, page_html: str):
+    def __init__(self, reference_data: dict | None, page_html: str, idle_seconds: float | None = IDLE_SECONDS, clock=time.monotonic):
+        if idle_seconds is not None and idle_seconds < 0:
+            raise ValueError("idle_seconds must not be negative")
         self.reference_data = reference_data
         self.page_html = page_html
+        self.idle_seconds = idle_seconds or None   # None or 0: the program never stops by itself
+        self._auto_stop_seconds = idle_seconds or IDLE_SECONDS   # what "on again" means
+        self._clock = clock
+        self._last_activity = clock()
+        self.expired = False                  # True once it stopped (or is stopping) because nobody used it
         self.busy = threading.Lock()          # held while an evaluation runs; a second one is refused at once
         self._lock = threading.Lock()         # protects the result slot
         self._result: Evaluation | None = None
         self._closed = False
+
+    def mark_used(self) -> None:
+        """Somebody used the program: the time until it stops by itself starts again."""
+        self._last_activity = self._clock()
+
+    def set_auto_stop(self, enabled: bool) -> None:
+        """Switch the stopping by itself off, or on again (with the time it was started with, or the default)."""
+        self.idle_seconds = (self._auto_stop_seconds if enabled else None)
+        self.mark_used()
+
+    def remaining(self) -> float | None:
+        """Seconds until it stops by itself if nobody uses it; None if it never does."""
+        if self.idle_seconds is None:
+            return None
+        return max(0.0, self.idle_seconds - (self._clock() - self._last_activity))
 
     def set_result(self, evaluation: Evaluation | None) -> None:
         with self._lock:
@@ -377,7 +443,7 @@ class AppServer(ThreadingHTTPServer):
     daemon_threads = True                     # a stuck evaluation must not keep the program alive
     allow_reuse_address = False               # on Windows this would let another program share the port
 
-    def __init__(self, port: int, state: _State):
+    def __init__(self, port: int, state: _State):  # noqa: D107
         self.state = state
         self.token = secrets.token_urlsafe(24)
         super().__init__(("127.0.0.1", port), _Handler)
@@ -393,6 +459,15 @@ class AppServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address) -> None:
         pass                                  # nothing is printed: a windowless build has no stderr
 
+    def service_actions(self) -> None:
+        """Called by serve_forever every half second: stops the program when nobody has used it for too long."""
+        state = self.state
+        remaining = state.remaining()
+        if remaining is not None and remaining <= 0 and not state.expired and not state.busy.locked():
+            state.expired = True              # never while an evaluation runs: it finishes first, then this fires
+            state.close()
+            self.shutdown_soon()
+
     def shutdown_soon(self) -> None:
         """Stop serving and close the port, from a thread of its own (shutdown() waits for the serve loop)."""
         def stop():
@@ -401,15 +476,22 @@ class AppServer(ThreadingHTTPServer):
         threading.Thread(target=stop, daemon=True).start()
 
 
-def create_server(reference_data: dict | None = None, port: int = 0, page_html: str | None = None) -> AppServer:
+def create_server(
+    reference_data: dict | None = None,
+    port: int = 0,
+    page_html: str | None = None,
+    idle_seconds: float | None = IDLE_SECONDS,
+    clock=time.monotonic,
+) -> AppServer:
     """
     The server for one run of the app, listening on 127.0.0.1 (port 0: a free one).
     Call serve_forever() on it; open `url`. `page_html` replaces the bundled page (tests).
+    `idle_seconds`: it stops by itself after this long without use (None or 0: never); `clock` is for tests.
     """
     html = _load_page() if page_html is None else page_html
     if _PAGE_PLACEHOLDER not in html:
         raise ValueError(f"the page has no {_PAGE_PLACEHOLDER} for the nonce of its script and style")
-    return AppServer(port, _State(reference_data, html))
+    return AppServer(port, _State(reference_data, html, idle_seconds, clock))
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -477,6 +559,9 @@ class _Handler(BaseHTTPRequestHandler):
         "/evaluate": {"POST": "_evaluate"},
         "/reset": {"POST": "_reset"},
         "/shutdown": {"POST": "_shutdown"},
+        "/status": {"GET": "_status"},          # read-only: asking does not count as use
+        "/activity": {"POST": "_activity"},     # the page says: somebody clicked, typed, scrolled or dropped a file
+        "/autostop": {"POST": "_autostop"},     # ?on=0 switches stopping by itself off, ?on=1 on again
     }
 
     def _dispatch(self) -> None:
@@ -490,6 +575,8 @@ class _Handler(BaseHTTPRequestHandler):
             action = methods.get(self.command)
             if action is None:
                 return self._send(405)
+            if action != "_status":
+                self.server.state.mark_used()     # only a request that passed every check above counts as use
             getattr(self, action)(found[1])
         except OSError:
             pass                              # the client went away or stalled; nobody is left to answer
@@ -514,6 +601,29 @@ class _Handler(BaseHTTPRequestHandler):
         fallback = re.sub(r"[^A-Za-z0-9._() -]", "_", evaluation.filename)
         disposition = f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(evaluation.filename, safe='')}"
         self._send(200, evaluation.data, _XLSX, extra=(("Content-Disposition", disposition),))
+
+    def _idle_payload(self) -> dict:
+        state = self.server.state
+        remaining = state.remaining()
+        return {"ok": True, "enabled": state.idle_seconds is not None,
+                "limit": None if state.idle_seconds is None else math.ceil(state.idle_seconds),
+                "remaining": None if remaining is None else math.ceil(remaining)}
+
+    def _status(self, query: str) -> None:
+        self._json(200, self._idle_payload())
+
+    def _activity(self, query: str) -> None:
+        self._json(200, self._idle_payload())          # that it counts as use happened in _dispatch
+
+    def _autostop(self, query: str) -> None:
+        try:
+            wanted = dict(parse_qsl(query, keep_blank_values=True, max_num_fields=5)).get("on")
+        except ValueError:                    # too many parameters
+            wanted = None
+        if wanted not in ("0", "1"):
+            return self._app_error(AppError("E304", detail="Der Parameter „on“ muss 0 oder 1 sein."))
+        self.server.state.set_auto_stop(wanted == "1")
+        self._json(200, self._idle_payload())
 
     def _reset(self, query: str) -> None:
         self.server.state.set_result(None)

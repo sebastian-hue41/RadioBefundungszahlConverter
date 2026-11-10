@@ -27,11 +27,15 @@ python -m local_app.main
 1. **Mitarbeiterstatistik**: choose the statistics file, or drag it onto the box.
 2. **Welche Bereiche?**: tick **Allrad**, **NRAD** or both.
 3. **Leistungsmaps**: choose the map file for each ticked department (see below).
-4. **Auswerten**, then **Excel herunterladen**.
+4. **Auswerten**, look at the **Vorschau** (the table of the Excel, before you download it), then **Excel herunterladen**.
 5. Next person: **Weitere Statistik hochladen** (the maps stay chosen until you reload the page).
 6. When you are done: **Server beenden**.
 
 The line next to **Auswerten** always says what is still missing. A red box says what went wrong and what to do.
+
+The program stops by itself after 30 minutes without use. The time left is shown at the bottom; every click, key press or scroll
+starts the 30 minutes again. To keep it running, use **Automatisches Beenden ausschalten** (it asks once more before it does it).
+`--idle-minutes N` changes the time, `--idle-minutes 0` turns it off.
 
 | You tick | Counted | Map used |
 |---|---|---|

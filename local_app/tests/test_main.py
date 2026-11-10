@@ -236,7 +236,7 @@ class TestCouldNotStart:
         assert "Could not start the app: FileNotFoundError" in out.out and "Traceback" not in out.out + out.err
 
     def test_a_port_that_cannot_be_bound(self, monkeypatch, capsys):
-        monkeypatch.setattr(app_main, "create_server", lambda reference: (_ for _ in ()).throw(OSError("no ports")))
+        monkeypatch.setattr(app_main, "create_server", lambda reference, **kwargs: (_ for _ in ()).throw(OSError("no ports")))
         assert app_main.main(["--no-browser"]) == 1
         assert "Could not start the app: OSError" in capsys.readouterr().out
 
@@ -440,3 +440,67 @@ class TestReferenceLoading:
     def test_a_missing_file_gives_the_empty_structure_and_a_reason(self, tmp_path):
         data = app_main.load_reference(tmp_path / "gone.xlsx")
         assert data["amounts"] == {} and len(data["problems"]) == 1
+
+
+# ── The time after which it stops by itself ────────────────────────────────────
+
+class TestIdleOption:
+
+    @pytest.fixture
+    def spy(self, monkeypatch):
+        calls = []
+        real = app_main.create_server
+
+        def spying(reference, **kwargs):
+            calls.append(kwargs)
+            return real(reference, **kwargs)
+
+        monkeypatch.setattr(app_main, "create_server", spying)
+        return calls
+
+    @pytest.mark.parametrize("args, seconds", [([], 1800), (["--idle-minutes", "5"], 300), (["--idle-minutes", "0.5"], 30), (["--idle-minutes", "0"], 0)])
+    def test_the_time_is_passed_on_in_seconds(self, spy, args, seconds):
+        thread, result, started = run_app("--no-browser", *args)
+        stop(thread, result, started.get(timeout=10))
+        assert spy[0]["idle_seconds"] == seconds
+
+    def test_the_console_says_so_when_it_is_on(self, capsys):
+        thread, result, started = run_app("--no-browser")
+        stop(thread, result, started.get(timeout=10))
+        assert "It also stops by itself after 30 minutes without use." in capsys.readouterr().out
+
+    def test_and_says_nothing_when_it_is_off(self, capsys):
+        thread, result, started = run_app("--no-browser", "--idle-minutes", "0")
+        stop(thread, result, started.get(timeout=10))
+        assert "by itself" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize("value", ["-1", "nan", "inf", "-inf", "abc", ""])
+    def test_a_wrong_value_is_refused_with_exit_code_2(self, value, capsys):
+        with pytest.raises(SystemExit) as info:
+            app_main.main(["--no-browser", "--idle-minutes", value])
+        assert info.value.code == 2
+
+    def test_nothing_is_started_for_a_wrong_value(self, spy):
+        with pytest.raises(SystemExit):
+            app_main.main(["--no-browser", "--idle-minutes", "-5"])
+        assert spy == []
+
+    def test_when_nobody_uses_it_it_stops_by_itself_with_exit_code_0(self, capsys):
+        servers = []
+        start = time.time()
+        assert app_main.main(["--no-browser", "--idle-minutes", "0.02"], on_ready=servers.append) == 0          # 1.2 seconds
+        out = capsys.readouterr().out
+        assert time.time() - start < 15
+        assert "The app stopped by itself after 0.02 minutes without use." in out and "has stopped" not in out
+        assert servers[0].state.expired is True and port_refuses_connections(servers[0].port)
+
+    def test_a_stop_by_the_button_is_not_reported_as_by_itself(self, capsys):
+        thread, result, started = run_app("--no-browser", "--idle-minutes", "5")
+        stop(thread, result, started.get(timeout=10))
+        out = capsys.readouterr().out
+        assert "The app has stopped." in out and "stopped by itself" not in out
+
+    def test_the_help_names_the_option(self):
+        helped = subprocess.run([sys.executable, "-B", "-m", "local_app.main", "--help"], cwd=ROOT, capture_output=True, text=True, timeout=30,
+                                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        assert "--idle-minutes" in helped.stdout and "default 30" in helped.stdout
