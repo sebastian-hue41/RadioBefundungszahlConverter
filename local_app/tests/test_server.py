@@ -824,6 +824,24 @@ import threading  # noqa: E402
 from local_app.server import _Handler, create_server  # noqa: E402
 
 
+def port_refuses_connections(port, seconds=15):
+    """
+    True once nobody listens on `port` any more. Only a refusal counts: a reset or a timeout is what a full,
+    unattended backlog looks like. Each attempt may take a few seconds because Windows needs about two seconds
+    to refuse a connection (Linux and macOS do it at once).
+    """
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            socket.create_connection(("127.0.0.1", port), timeout=3).close()
+        except ConnectionRefusedError:
+            return True
+        except OSError:
+            pass
+        time.sleep(0.05)
+    return False
+
+
 class Response:
     def __init__(self, status, headers, body):
         self.status, self.headers, self.body = status, headers, body
@@ -1435,16 +1453,7 @@ class TestShutdown:
 
     @staticmethod
     def port_is_closed(app):
-        deadline = time.time() + 5
-        while time.time() < deadline:
-            try:
-                socket.create_connection(("127.0.0.1", app.port), timeout=0.3).close()
-            except ConnectionRefusedError:            # only this means nobody listens any more: a reset or a
-                return True                           # timeout is what a full, unattended backlog looks like
-            except OSError:
-                pass
-            time.sleep(0.05)
-        return False
+        return port_refuses_connections(app.port)
 
     def test_it_answers_stops_serving_closes_the_port_and_clears_the_result(self, app):
         post_files(app, make_files())

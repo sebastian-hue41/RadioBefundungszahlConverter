@@ -17,7 +17,7 @@ from local_app import main as app_main
 from local_app import server
 from local_app.errors import ALLRAD, NRAD, STATISTICS
 
-from .test_server import ALLRAD_CODES, NRAD_CODES, SECTIONS, make_files, post_files
+from .test_server import ALLRAD_CODES, NRAD_CODES, SECTIONS, make_files, port_refuses_connections, post_files
 
 ROOT = Path(app_main.__file__).resolve().parent.parent
 
@@ -150,8 +150,7 @@ class TestRun:
         srv = started.get(timeout=10)
         assert own_request(srv, "GET")[0] == 200
         stop(thread, result, srv)
-        with pytest.raises(OSError):
-            socket.create_connection(("127.0.0.1", srv.port), timeout=0.5).close()       # the port is closed again
+        assert port_refuses_connections(srv.port)                                    # the port is closed again
 
     def test_it_prints_the_address_and_how_to_stop(self, capsys):
         thread, result, started = run_app("--no-browser")
@@ -183,8 +182,7 @@ class TestRun:
         assert app_main.main(["--no-browser"], on_ready=servers.append) == 0
         out = capsys.readouterr().out
         assert "Stopped (Ctrl+C)" in out and "has stopped" in out
-        with pytest.raises(ConnectionRefusedError):
-            socket.create_connection(("127.0.0.1", servers[0].port), timeout=0.5).close()
+        assert port_refuses_connections(servers[0].port)
 
     def test_nothing_goes_to_stderr(self, capfd):
         thread, result, started = run_app("--no-browser")
