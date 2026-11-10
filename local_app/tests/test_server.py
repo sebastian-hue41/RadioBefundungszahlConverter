@@ -1598,6 +1598,11 @@ class TestShutdown:
 
 # ── Stopping by itself after a while without use ───────────────────────────────
 
+def wrong_token(token):
+    """A token that differs from `token` in its last character, whatever that character is."""
+    return token[:-1] + ("a" if token[-1] != "a" else "b")
+
+
 class Clock:
     """A clock the tests move by hand, so that thirty minutes take no time."""
 
@@ -1722,12 +1727,16 @@ class TestStatusAndActivity:
         clock.advance(40)
         assert call(srv, "POST", at(srv, "activity")).json["remaining"] == 60
 
+    def test_the_wrong_token_is_always_wrong(self):
+        for token in ("abcx", "abca", "abcb"):
+            assert wrong_token(token) != token
+
     @pytest.mark.parametrize("what", ["wrong token", "wrong host", "foreign origin", "cross-site", "wrong method", "unknown route", "no token"])
     def test_a_refused_request_never_counts_as_use(self, timed, what):
         srv, clock = timed
         clock.advance(30)
         calls = {
-            "wrong token": lambda: call(srv, "POST", f"/{srv.token[:-1]}x/activity"),
+            "wrong token": lambda: call(srv, "POST", f"/{wrong_token(srv.token)}/activity"),
             "wrong host": lambda: call(srv, "POST", at(srv, "activity"), host="evil.example"),
             "foreign origin": lambda: call(srv, "POST", at(srv, "activity"), headers={"Origin": "http://evil.example"}),
             "cross-site": lambda: call(srv, "POST", at(srv, "activity"), headers={"Sec-Fetch-Site": "cross-site"}),
