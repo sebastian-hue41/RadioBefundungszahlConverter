@@ -41,9 +41,14 @@ ROWS = ["RMRT", "RMRT", "RCT", "NMRT", "NCT", "NCT", "NCT"]          # 3 Allrad 
 results = []
 
 
+def ascii_only(text):
+    """Printed text is plain ASCII, so that no console code page (Windows) can stop the test."""
+    return str(text).encode("ascii", "replace").decode("ascii")
+
+
 def check(name, ok, detail=""):
     results.append((name, bool(ok)))
-    print(("PASS " if ok else "FAIL ") + name + (f"   [{detail}]" if detail and not ok else ""), flush=True)
+    print(ascii_only(("PASS " if ok else "FAIL ") + name + (f"   [{detail}]" if detail and not ok else "")), flush=True)
 
 
 # ── Made-up workbooks ──────────────────────────────────────────────────────────
@@ -100,7 +105,7 @@ def check_archive(path):
     try:
         from PyInstaller.archive.readers import CArchiveReader
     except ImportError:
-        print("SKIP archive check: PyInstaller is not importable here")
+        print("SKIP archive check: PyInstaller is not importable here", flush=True)
         return
     reader = CArchiveReader(path)
     names = sorted(name.replace("\\", "/") for name in reader.toc)
@@ -174,7 +179,7 @@ def totals(xlsx_bytes):
 
 
 def run(path):
-    print(f"== program: {path} ({os.path.getsize(path) / 1e6:.1f} MB)", flush=True)
+    print(ascii_only(f"== program: {path} ({os.path.getsize(path) / 1e6:.1f} MB)"), flush=True)
     check_archive(path)
     cwd = tempfile.mkdtemp(prefix="local_app_smoke_")
     program = Program(path, cwd)
@@ -230,16 +235,21 @@ def run(path):
         except subprocess.TimeoutExpired:
             code = None
         check("it exits with code 0", code == 0, str(code))
-        time.sleep(0.3)
         port = int(program.host.rsplit(":", 1)[1])
-        try:
-            socket.create_connection(("127.0.0.1", port), timeout=1).close()
-            closed = False
-        except ConnectionRefusedError:
-            closed = True
-        except OSError:
-            closed = False
+        closed, deadline = False, time.time() + 15
+        while not closed and time.time() < deadline:        # Windows needs a moment to refuse a connection
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=3).close()
+            except ConnectionRefusedError:
+                closed = True
+            except OSError:
+                pass
+            if not closed:
+                time.sleep(0.2)
         check("the port is closed", closed)
+        deadline = time.time() + 15
+        while program.unpacked & unpack_folders() and time.time() < deadline:      # Windows deletes the folder a little later
+            time.sleep(0.2)
         check("the temporary _MEI folder is gone", not (program.unpacked & unpack_folders()), str(program.unpacked & unpack_folders()))
         out = b"".join(program.printed) + b"".join(list(program.lines.queue))
         check("the console output is plain ASCII", all(byte < 128 for byte in out) and b"has stopped" in out)
@@ -269,5 +279,5 @@ if __name__ == "__main__":
     watchdog(240)
     run(os.path.abspath(sys.argv[1]))
     failed = [name for name, ok in results if not ok]
-    print(f"\n{len(results) - len(failed)} of {len(results)} checks passed" + (f"; FAILED: {failed}" if failed else ""))
+    print(ascii_only(f"\n{len(results) - len(failed)} of {len(results)} checks passed" + (f"; FAILED: {failed}" if failed else "")))
     sys.exit(1 if failed else 0)

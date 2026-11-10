@@ -1,0 +1,106 @@
+# Builds the local app as a single-file program on Windows, macOS and Linux and tests it.
+#
+# This file exists only on the branch `local` and runs only for pushes to it. It needs no map and
+# no patient data: the tests and the smoke test use workbooks they make up themselves.
+#
+# Per operating system: install the pinned requirements, run all tests, build with the same spec
+# as on a developer machine (local_app/radiobefund_local.spec), run the smoke test against the
+# finished program, and keep the program as a build artifact (a tar file on macOS and Linux, so
+# that the executable bit survives).
+#
+# If an existing test fails only on one operating system, name it in that system's `deselect`
+# below, e.g.  deselect: "--deselect tests/test_x.py::TestY::test_z"  (and say why in a comment).
+# Tests are skipped here, never edited.
+name: Build local app
+
+on:
+  push:
+    branches: [local]
+
+# The token can only read the repository. Nothing here writes to it, comments, or publishes.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-local-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows
+            runner: windows-2025
+            program: befundungszahlen.exe
+            artifact: befundungszahlen-windows-x64.exe
+            deselect: ""
+          - label: macOS (Apple Silicon)
+            runner: macos-15
+            program: befundungszahlen
+            artifact: befundungszahlen-macos-arm64.tar.gz
+            deselect: ""
+          - label: Linux
+            runner: ubuntu-24.04
+            program: befundungszahlen
+            artifact: befundungszahlen-linux-x64.tar.gz
+            deselect: ""
+    env:
+      PROGRAM: ${{ matrix.program }}
+      ARTIFACT: ${{ matrix.artifact }}
+      DESELECT: ${{ matrix.deselect }}
+    steps:
+      - name: Check out the branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+
+      # PyYAML is only for the tests of this file (local_app/tests/test_workflow.py); the program does not use it.
+      - name: Install the pinned build requirements and pytest
+        run: |
+          python -m pip install --disable-pip-version-check -r local_app/requirements-build.txt pytest==9.2.0 pyyaml==6.0.3
+          python -m pip list
+
+      - name: Run all tests
+        run: python -m pytest -q -p no:cacheprovider $DESELECT
+
+      - name: Build the program
+        run: >
+          python -m PyInstaller --noconfirm --clean
+          --distpath "$RUNNER_TEMP/dist" --workpath "$RUNNER_TEMP/work"
+          local_app/radiobefund_local.spec
+
+      - name: Smoke test the finished program
+        run: python local_app/tests/smoke_binary.py "$RUNNER_TEMP/dist/$PROGRAM"
+
+      - name: Package the program
+        run: |
+          mkdir "$RUNNER_TEMP/out"
+          if [[ "$ARTIFACT" == *.tar.gz ]]; then
+            tar -czf "$RUNNER_TEMP/out/$ARTIFACT" -C "$RUNNER_TEMP/dist" "$PROGRAM"
+          else
+            cp "$RUNNER_TEMP/dist/$PROGRAM" "$RUNNER_TEMP/out/$ARTIFACT"
+          fi
+          ls -l "$RUNNER_TEMP/out"
+
+      - name: Keep the program as a build artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/out/${{ matrix.artifact }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
