@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Union
 
 import openpyxl
+from openpyxl.utils import get_column_letter
 
 log = logging.getLogger(__name__)
 
@@ -250,14 +251,27 @@ def validate_xlsx_bytes(data: bytes, name: str = "upload") -> None:
     _validate_zip_content(data, name)
 
 
+_MAX_SHOWN_VALUE = 60       # characters of a cell value quoted in a message
+
+
+def _shown_value(value) -> str:
+    """repr() of a cell value for a message, shortened: a cell can hold 32,767 characters."""
+    text = repr(value)
+    return text if len(text) <= _MAX_SHOWN_VALUE else text[: _MAX_SHOWN_VALUE - 3] + "..."
+
+
+def _looks_like_formula(value) -> bool:
+    """True for a string that a spreadsheet program could take for a formula."""
+    return isinstance(value, str) and value.strip().startswith(_FORMULA_PREFIXES)
+
+
 def _check_cell_for_injection(value, context: str = "") -> None:
     """Raises FileValidationError if a string cell value looks like a formula injection."""
-    if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.startswith(_FORMULA_PREFIXES):
-            raise FileValidationError(
-                f"Potential formula injection detected{' in ' + context if context else ''}: {value!r}"
-            )
+    if _looks_like_formula(value):
+        raise FileValidationError(
+            f"Potential formula injection detected{' in ' + context if context else ''}: "
+            f"{_shown_value(value)}"
+        )
 
 
 # ── Statistics loader ──────────────────────────────────────────────────────────
@@ -421,7 +435,12 @@ def load_statistics(source: XlsxSource) -> dict:
         # ── Read examination rows ──────────────────────────────────────────
         leistungen: list[dict] = []
         current_date = None
+        previous_ind1 = None
         row_count = 0
+        # Leistung texts that look like a formula: leist_kurz → [rows, first row number].
+        # The text is only a label (the code is what is counted), so such a text is
+        # left out instead of refusing the whole file.
+        formula_texts: dict[str, list[int]] = {}
         # Collect IND2 values from every non-empty row (including rows that will
         # later be skipped for missing LeistKurz or bad date).  Used after the loop
         # to compute total_leistungen via the IND2 group-end algorithm.
@@ -462,9 +481,15 @@ def load_statistics(source: XlsxSource) -> dict:
                 except (TypeError, ValueError):
                     pass
 
-            # Carry forward date from the first row of a visit group.
+            # Carry forward date from the first row of a visit group. A new report
+            # (another IND1) without a DokDatum of its own must not inherit the date
+            # of the report before it: its rows are skipped and reported instead.
             if dok_datum is not None:
                 current_date = dok_datum
+            elif ind1 is not None and previous_ind1 is not None and ind1 != previous_ind1:
+                current_date = None
+            if ind1 is not None:
+                previous_ind1 = ind1
 
             if leist_kurz is None:
                 ind_info = f" (IND1={ind1})" if ind1 is not None else f" row {row_num}"
@@ -476,13 +501,14 @@ def load_statistics(source: XlsxSource) -> dict:
             leist_kurz_str = str(leist_kurz).strip()
             leistung_str = str(leistung).strip() if leistung else None
 
-            # Injection check on user-supplied string values.
-            try:
-                _check_cell_for_injection(leist_kurz_str, f"Leist-Kurz at row {row_num}")
-                if leistung_str:
-                    _check_cell_for_injection(leistung_str, f"Leistung at row {row_num}")
-            except FileValidationError:
-                raise  # re-raise as-is; caller treats FileValidationError as fatal
+            # Injection check on user-supplied string values. The code is the key of
+            # the evaluation, so a formula-like code refuses the file; a formula-like
+            # Leistung text is only left out (see formula_texts).
+            _check_cell_for_injection(leist_kurz_str, f"Leist-Kurz at row {row_num}")
+            if leistung_str and _looks_like_formula(leistung_str):
+                seen = formula_texts.setdefault(leist_kurz_str, [0, row_num])
+                seen[0] += 1
+                leistung_str = None
 
             year = _parse_year(current_date)
             if year is None:
@@ -501,6 +527,13 @@ def load_statistics(source: XlsxSource) -> dict:
                     "ind1": ind1,
                     "row": row_num,
                 }
+            )
+
+        for code, (rows, first_row) in formula_texts.items():
+            errors.append(
+                f"WARNING: The Leistung text of '{code}' looks like a formula (starts with "
+                f"=, +, -, @ or |) and is not used; the code stands in for it "
+                f"({rows:,} row(s), first at row {first_row})."
             )
 
         if not leistungen:
@@ -546,6 +579,32 @@ def load_statistics(source: XlsxSource) -> dict:
 
 # ── Map loader ─────────────────────────────────────────────────────────────────
 
+_MAX_BAD_VALUES_SHOWN = 5      # cells named in the message about invalid map values
+
+
+def _section_value(value) -> "int | None":
+    """
+    The count of a map section cell: empty → 0, a whole number ≥ 0 → that number
+    (also when it is stored as a float such as 1.0 or as text such as "1").
+    None for anything else (1.5, -1, "x", TRUE, a date): such a cell would be counted
+    wrongly without a word, so the map is refused instead.
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float):
+        return int(value) if value.is_integer() and value >= 0 else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0
+        return int(text) if text.isascii() and text.isdigit() and len(text) <= 9 else None
+    return None
+
+
 def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> dict:
     """
     Loads and validates the map xlsx file.
@@ -564,7 +623,8 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
         leistungen          dict[str, dict]   leist0 → {kurztext, sections, row}
         merged_duplicates   list[str]         leist0 codes merged by max() across rows
 
-    Raises MapValidationError for structural/content problems.
+    Raises MapValidationError for structural/content problems, including two section
+    columns with one name and a section cell that is not empty or a whole number ≥ 0.
     Raises FileValidationError for file-level security problems.
     """
     src = _resolve_source(source, "map.xlsx")
@@ -587,7 +647,7 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
         b1 = header[1] if len(header) > 1 else None
         if b1 != "Leist0":
             raise MapValidationError(
-                f"Map validation failed: B1 is {b1!r}, expected 'Leist0'. "
+                f"Map validation failed: B1 is {_shown_value(b1)}, expected 'Leist0'. "
                 "Please provide a valid map file. "
                 "(An admin can upload a corrected map file to resolve this.)",
                 recoverable=False,
@@ -596,7 +656,7 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
         f1 = header[5] if len(header) > 5 else None
         if f1 != "DL Gefäße":
             raise MapValidationError(
-                f"Map validation failed: F1 is {f1!r}, expected 'DL Gefäße'. "
+                f"Map validation failed: F1 is {_shown_value(f1)}, expected 'DL Gefäße'. "
                 "The map file may use a different column layout. "
                 "(An admin can upload a corrected map file to resolve this.)",
                 recoverable=True,
@@ -605,6 +665,7 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
         # ── Collect section columns (F / index 5 onwards) ─────────────────
         sections: list[str] = []
         section_col_indices: list[int] = []  # 0-based
+        first_column_of: dict[str, int] = {}  # section name → its 0-based column
 
         for col_idx, col_name in enumerate(header[5:], 5):
             if col_name is None:
@@ -616,7 +677,15 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
                 continue
             # Section names become the row labels of the output, so a formula in
             # a header cell must not get that far.
-            _check_cell_for_injection(name, f"section name {name!r}")
+            _check_cell_for_injection(name, f"section name {_shown_value(name)}")
+            if name in first_column_of:
+                # Two columns with one name: one of them would silently replace the other.
+                raise MapValidationError(
+                    f"Duplicate section name in map: {_shown_value(name)} is the header of "
+                    f"columns {get_column_letter(first_column_of[name] + 1)} and "
+                    f"{get_column_letter(col_idx + 1)}. Every section column needs a name of its own."
+                )
+            first_column_of[name] = col_idx
             sections.append(name)
             section_col_indices.append(col_idx)
 
@@ -637,6 +706,8 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
         # Track duplicates: leist0 → list of candidate entries
         candidates: dict[str, list[dict]] = {}
         row_count = 0
+        bad_values = 0                    # section cells that are not a whole number ≥ 0
+        bad_examples: list[str] = []
 
         # Read only the columns that are used (see load_statistics).
         data_max_col = max(section_col_indices) + 1
@@ -674,11 +745,15 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
             section_values: dict[str, int] = {}
             for section_name, col_idx in zip(sections, section_col_indices):
                 val = _get_map(col_idx)
-                try:
-                    int_val = int(val) if isinstance(val, (int, float)) else 0
-                    section_values[section_name] = int_val if int_val >= 1 else 0
-                except (TypeError, ValueError):
-                    section_values[section_name] = 0
+                int_val = _section_value(val)
+                if int_val is None:
+                    bad_values += 1
+                    if len(bad_examples) < _MAX_BAD_VALUES_SHOWN:
+                        bad_examples.append(
+                            f"{get_column_letter(col_idx + 1)}{row_num} = {_shown_value(val)}"
+                        )
+                    int_val = 0
+                section_values[section_name] = int_val
 
             entry = {
                 "kurztext": kurztext,
@@ -687,6 +762,14 @@ def load_map(source: XlsxSource, include_underscore_columns: bool = False) -> di
             }
 
             candidates.setdefault(leist0_str, []).append(entry)
+
+        if bad_values:
+            more = f" and {bad_values - len(bad_examples):,} more" if bad_values > len(bad_examples) else ""
+            raise MapValidationError(
+                f"Invalid value in map: a section cell must be empty or a whole number "
+                f"(0, 1, 2, …). Found {bad_values:,} other cell(s): "
+                f"{'; '.join(bad_examples)}{more}."
+            )
 
         if not candidates:
             raise MapValidationError(

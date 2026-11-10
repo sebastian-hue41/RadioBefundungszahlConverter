@@ -67,7 +67,7 @@ The output xlsx is built **entirely in memory** — no files are written to disk
 
 ### Date carry-forward
 
-The RIS only writes `DokDatum` on the **first row of each visit** (IND2 = 1). All subsequent rows in the same visit leave it blank. The loader carries the last seen date forward automatically, so every procedure from the same visit is counted in the same year.
+The RIS only writes `DokDatum` on the **first row of each visit** (IND2 = 1). All subsequent rows in the same visit leave it blank. The loader carries the last seen date forward automatically, so every procedure from the same visit is counted in the same year. A new visit (another `IND1`) whose first row has no `DokDatum` does not inherit the date of the visit before it: its rows are skipped with a warning and show up in the count check.
 
 ### How IND2 computes the expected total
 
@@ -88,7 +88,7 @@ After loading, the number of successfully processed rows is compared against thi
 For each loaded examination, the tool looks up its `Leist-Kurz` in the map:
 
 - **Found** — for every section in the map entry where the weight `val ≥ 1`, add `val` to that section's counter for that year. A weight of `2` means one procedure counts twice — used for multi-region scans that are billed separately for each body region.
-- **Not found** — the procedure is appended as its own row using its human-readable `Leistung` name, so nothing is silently lost.
+- **Not found** — the procedure is appended as its own row using its human-readable `Leistung` name, so nothing is silently lost. It is counted under its own code. If that name is also the name of a section, of a reference row or of another missing code, the code is added to the row name (for example `Drainage (RXXDR)`), so its count never ends up in another row.
 
 ### End-to-end summary
 
@@ -144,6 +144,9 @@ python -m cli.main <statistics.xlsx> <map.xlsx> [options]
 | `--output DIR` | `.` (current directory) | Directory where the output file is saved |
 | `--include-underscore` | off | Include `_`-prefixed section columns from the map |
 | `--reference FILE` | `reference_amount.xlsx` (auto-detected in CWD) | Path to the reference file with required amounts per section |
+| `--overwrite` | off | Replace an existing output file of the same name. Without it, the existing file is kept and the new one is saved as `<name>_2.xlsx`, `<name>_3.xlsx`, … (the same staff member evaluated with another map gets the same name) |
+
+The file name is built from the Mitarbeiter and Befunddatum of the statistics; very long values are shortened so the name stays within the limits of the file system.
 
 ### Examples
 
@@ -305,7 +308,9 @@ A mapping table. Expected structure:
 - **B1** — must be `Leist0` (procedure code column)
 - **F1** — must be `DL Gefäße` (first section column)
 - **Column B** — procedure short codes matching `Leist-Kurz` in the statistics file
-- **Columns F onwards** — section names; a cell value of `1` means the procedure belongs to that section
+- **Columns F onwards** — section names; a cell value of `1` means the procedure belongs to that section, `2` that it counts twice there, an empty cell or `0` that it does not count there
+- Every section column needs a name of its own; a name used for two columns refuses the map
+- A section cell must be empty or a whole number (`0`, `1`, `2`, …; `1.0` and the text `"1"` are read as `1`). Anything else (`1.5`, `-1`, `x`, a date) refuses the map with a message that names the cells, because such a value would otherwise be counted wrongly without a word
 
 Duplicate procedure codes are resolved automatically: if both entries have section assignments, values are merged by taking the maximum per column. A warning is written to the output noting which codes were affected.
 
@@ -355,10 +360,14 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 | `Leist-Kurz` column missing | Fatal error — file is not a valid statistics export |
 | `B1 ≠ Leist0` | Fatal error — map file is invalid |
 | `F1 ≠ DL Gefäße` | Structured error (recoverable — admin can supply a corrected map) |
-| Procedure not found in map | Appended as its own row in output; processing continues |
+| Procedure not found in map | Appended as its own row in output (the code is added to the row name if the name is already taken); processing continues |
 | Duplicate map entries, conflicting | Merged by max-per-column; noted in output footer |
 | Duplicate map entries, identical | Silently deduplicated |
-| Formula injection in cells or in map section names | Fatal error — file rejected as potentially malicious |
+| Two map section columns with the same name | Fatal error — map file is invalid |
+| Map section cell that is not empty or a whole number ≥ 0 | Fatal error — map file is invalid; the message names the cells |
+| Formula injection in a code, a map cell or a map section name | Fatal error — file rejected as potentially malicious |
+| `Leistung` text of the statistics that looks like a formula | The text is not used (the code stands in for it); warning in the output; processing continues |
+| Output file of the same name already exists (CLI) | Kept; the new file gets `_2`, `_3`, … (`--overwrite` replaces it) |
 | XML entity (DTD) declaration or non-UTF-8 XML in a file | Fatal error — file rejected as potentially malicious |
 | Damaged or malformed content inside a file (cut-off XML, missing part) | Fatal error with a clear message — 422 on the web, an `ERROR` line on the CLI |
 | The result would contain a formula or a link | Fatal error — nothing is delivered or written (500 on the web) |
@@ -370,8 +379,8 @@ When reference data is present, the **Gesamt** cell for each section is colour-c
 | Individual reference row unusable (negative or non-numeric amount, amount > 1 000 000, formula-like or missing section name) | That row skipped; rest of reference data used; the row is listed on the result sheet. An amount of 0 means "no required amount" and is not reported |
 | Reference file without any usable amount | Benötigt column omitted; noted on the result sheet |
 | Section has no reference entry | Gesamt cell uncoloured; Benötigt cell left blank |
-| Request body > 60 MB | 413 before file is read into memory |
-| Waiting for the request or the response takes > 60 s | 503 response; worker continues serving other requests |
+| Request body > 60 MB | 413 — from `Content-Length` before reading; without that header, as soon as the body read so far passes the limit |
+| A request takes > 60 s | 503 response; worker continues serving other requests |
 
 ---
 
@@ -385,12 +394,14 @@ All user-uploaded files are treated as potentially malicious. Server-side files 
 - Zip bombs are detected: per-entry compression ratio > 50:1 or total uncompressed size > 200 MB
 - VBA macro presence causes immediate rejection
 - Every entry of the zip is scanned for XML entity / DTD declarations (`<!DOCTYPE`, `<!ENTITY`, …, also in UTF-16 form), and XML parts must be UTF-8. Otherwise the parser would resolve entities, and a file could inject text into the evaluation or exhaust memory. The scan runs after the zip bomb checks, so nothing is unpacked from an archive that failed them
-- File size is capped at 50 MB per file; the HTTP body is capped at 60 MB
+- File size is capped at 50 MB per file; the HTTP body is capped at 60 MB, checked from `Content-Length` and again while the body is read
 - The loaders read only the columns they use. A sheet can declare thousands of columns, and the reader pads every missing row to that width, so a tiny file with one far-away cell used to keep the loader busy for about 15 seconds
 - Damaged or malformed content inside a file is reported as a validation error, not as an internal error
-- Every string cell value is checked for formula injection characters (`=`, `+`, `-`, `@`, `|`, …); so are the map's section names (column headers), which become the row labels of the output
+- Every code and map cell is checked for formula injection characters (`=`, `+`, `-`, `@`, `|`, …); so are the map's section names (column headers), which become the row labels of the output. A `Leistung` text of the statistics that starts with one of them is not used (the code stands in for it), so one odd text does not refuse the whole file
+- Messages quote at most 60 characters of a cell value; the web worker returns at most 500 characters of an error message
 - The finished workbook is checked once more before it is delivered or written: it must hold no formula and no link
 - Reference amounts are bounds-checked (must be positive integers ≤ 1 000 000)
 - Map files are limited to 500 section columns to prevent memory exhaustion
 - All HTTP responses include `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`
-- Each request has a 60 second budget. It is enforced while the worker waits for input and output; the parsing itself cannot be interrupted, so it is bounded by the size limits above (50 MB per file, 200 MB unpacked, 500 000 rows, 500 section columns)
+- Each request has a 60 second budget. Parsing and building the result run in a background thread, at most two at a time, so the worker keeps answering other requests and sends the 503 on time. A conversion that has started cannot be stopped; it is bounded by the size limits above (50 MB per file, 200 MB unpacked, 500 000 rows, 500 section columns) and its result is dropped
+- The download name is sent as plain ASCII plus the exact UTF-8 name (RFC 6266), so umlauts in a staff name survive

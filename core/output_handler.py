@@ -6,7 +6,8 @@ Two public entry points:
       Builds the workbook entirely in memory. Used by the iii web worker —
       no files are ever written to disk on the server.
   save_output(result, output_dir) -> str
-      Builds the workbook and saves it to disk. Used by the CLI.
+      Builds the workbook and saves it to disk, without replacing an existing
+      file unless asked to. Used by the CLI.
 
 Both refuse to deliver a workbook that would hold a formula or a link
 (OutputValidationError): the result is text and numbers only.
@@ -21,6 +22,8 @@ import openpyxl
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+from core.logic import unique_row_label
 
 # ── Palette ────────────────────────────────────────────────────────────────────
 # One dark accent (header only), one near-white accent (Gesamt/Benötigt),
@@ -97,10 +100,25 @@ def _accent_cell(cell, value, bold: bool = True) -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+# File systems allow 255 bytes per file name. The parts taken from the statistics
+# file are cut to these lengths (UTF-8 bytes), which leaves room for "Auswertung",
+# a number added by save_output and ".xlsx".
+_MAX_NAME_BYTES = 100
+_MAX_DATE_BYTES = 60
+
+
+def _cut_utf8(text: str, max_bytes: int) -> str:
+    """`text` cut to at most `max_bytes` UTF-8 bytes, never inside a character."""
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", "ignore")
+
+
 def _make_filename(mitarbeiter: str | None, befunddatum: str | None) -> str:
     if mitarbeiter and befunddatum:
         clean = lambda s: re.sub(r"[^\w\-]", "", s.replace(" ", ""))
-        name = f"{clean(mitarbeiter)}{clean(befunddatum)}Auswertung"
+        name = (
+            f"{_cut_utf8(clean(mitarbeiter), _MAX_NAME_BYTES)}"
+            f"{_cut_utf8(clean(befunddatum), _MAX_DATE_BYTES)}Auswertung"
+        )
     else:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         name = f"Auswertung_{ts}"
@@ -228,6 +246,23 @@ def _build_workbook(
         _ref_problems = []
     # What the loader could not use of the reference file, as short plain text.
     _ref_problems = [str(p)[:300] for p in _ref_problems if p] if isinstance(_ref_problems, list) else []
+
+    # A row of a Leistung that is not in the map must not be taken for a reference row:
+    # it would get that row's target, be summed into a combination row, or be dropped
+    # as already shown. Such a row gets its code added to its label (logic.py has
+    # already kept it apart from the sections and from the other missing codes).
+    unmatched_rows: dict[str, str] = result.get("unmatched_rows") or {}
+    if unmatched_rows:
+        reserved = {str(n).casefold() for n in (*_ref_order, *_ref, *_combinations)}
+        reserved |= {str(c).casefold() for parts in _combinations.values() for c in parts}
+        if any(label.casefold() in reserved for label in unmatched_rows if label in data):
+            taken = reserved | {name.casefold() for name in data}
+            renamed: dict[str, dict] = {}
+            for name, row in data.items():
+                if name in unmatched_rows and name.casefold() in reserved:
+                    name = unique_row_label(name, unmatched_rows[name], taken)
+                renamed[name] = row
+            data = renamed
 
     _ref_lower: dict[str, int] = {k.lower(): v for k, v in _ref.items()}
     has_reference = bool(_ref)
@@ -523,11 +558,15 @@ def build_xlsx_bytes(
     return filename, buf.getvalue()
 
 
+_MAX_NAME_ATTEMPTS = 1000
+
+
 def save_output(
     result: dict,
     output_dir: str = ".",
     reference_amounts: "dict[str, int] | None" = None,
     reference_data: "dict | None" = None,
+    overwrite: bool = False,
 ) -> str:
     """
     Build the xlsx and save it to `output_dir` on disk.
@@ -536,12 +575,19 @@ def save_output(
     and reference-file ordering.  `reference_amounts` is kept for backward
     compatibility when only the amounts dict is available.
 
+    An existing file is never replaced unless `overwrite` is true: the result is
+    saved as "<name>_2.xlsx", "<name>_3.xlsx", … instead (the same staff member
+    evaluated with another map gets the same name).
+
     Returns the absolute path of the saved file.
     Raises IOError if the directory cannot be created or the file cannot be written.
     """
     filename, wb = _build_workbook(
         result, reference_amounts=reference_amounts, reference_data=reference_data
     )
+    buf = io.BytesIO()
+    wb.save(buf)
+    content = buf.getvalue()
 
     try:
         out_dir = Path(output_dir).resolve()
@@ -550,9 +596,30 @@ def save_output(
     except Exception as exc:
         raise IOError(f"Cannot prepare output directory '{output_dir}': {exc}") from exc
 
-    try:
-        wb.save(output_path)
-    except Exception as exc:
-        raise IOError(f"Failed to save output file to '{output_path}': {exc}") from exc
+    stem, suffix = output_path.stem, output_path.suffix
+    for attempt in range(1, _MAX_NAME_ATTEMPTS + 1):
+        if attempt > 1:
+            output_path = out_dir / f"{stem}_{attempt}{suffix}"
+        try:
+            # "x" creates the file and fails if it exists, so nothing is replaced
+            # even when another program creates the same name at the same moment.
+            fh = open(output_path, "wb" if overwrite else "xb")
+        except FileExistsError:
+            continue
+        except Exception as exc:
+            raise IOError(f"Failed to save output file to '{output_path}': {exc}") from exc
+        try:
+            with fh:
+                fh.write(content)
+        except Exception as exc:
+            try:
+                output_path.unlink()        # no half-written file under the name
+            except OSError:
+                pass
+            raise IOError(f"Failed to save output file to '{output_path}': {exc}") from exc
+        return str(output_path)
 
-    return str(output_path)
+    raise IOError(
+        f"Failed to save output file: '{filename}' and {_MAX_NAME_ATTEMPTS - 1} numbered "
+        f"variants of it already exist in '{out_dir}'."
+    )

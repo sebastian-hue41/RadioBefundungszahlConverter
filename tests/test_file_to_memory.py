@@ -12,7 +12,7 @@ from datetime import date, datetime
 import openpyxl
 import pytest
 
-from core.input_handler import load_map, load_reference_amounts, load_statistics
+from core.input_handler import MapValidationError, load_map, load_reference_amounts, load_statistics
 from .helpers import (
     make_map_wb,
     make_reference_wb,
@@ -201,16 +201,16 @@ class TestMapFieldValues:
         result = load_map(save_wb(wb, tmp_path / "m.xlsx"))
         assert result["sections"] == sections
 
-    def test_non_one_non_two_values_treated_as_zero(self, tmp_path):
-        """Negative values and strings are treated as 0."""
+    def test_a_negative_value_refuses_the_map(self, tmp_path):
+        """It used to count as 0 without a word; see tests/test_bug_fixes.py for the full rule."""
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.cell(row=1, column=2).value = "Leist0"
         ws.cell(row=1, column=6).value = "DL Gefäße"
         ws.cell(row=2, column=2).value = "CODE"
         ws.cell(row=2, column=6).value = -1
-        result = load_map(save_wb(wb, tmp_path / "m.xlsx"))
-        assert result["leistungen"]["CODE"]["sections"]["DL Gefäße"] == 0
+        with pytest.raises(MapValidationError, match=r"Invalid value in map.*F2 = -1"):
+            load_map(save_wb(wb, tmp_path / "m.xlsx"))
 
     def test_20_codes_all_read(self, tmp_path):
         codes = [(f"CODE{i:02d}", f"Desc {i}", {"DL Gefäße": i % 2, "MRT": 0, "CT": 0})
