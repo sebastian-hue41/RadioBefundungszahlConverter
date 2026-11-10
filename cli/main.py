@@ -7,6 +7,8 @@ Usage:
 Options:
     --output DIR            Directory to save the output file (default: current directory)
     --include-underscore    Include underscore-prefixed map columns in output
+    --overwrite             Replace an existing output file of the same name
+                            (default: keep it and save as <name>_2.xlsx, ...)
 
 The processing logic (logic.py) and loaders (input_handler.py) are kept
 independent of this CLI so they can be called directly from a future API layer.
@@ -14,6 +16,7 @@ independent of this CLI so they can be called directly from a future API layer.
 
 import argparse
 import os
+import re
 import sys
 
 from core.input_handler import (
@@ -55,6 +58,14 @@ examples:
         "--include-underscore",
         action="store_true",
         help="Include underscore-prefixed section columns from the map (e.g. _CLIP, _TRENNER)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Replace an existing output file of the same name "
+            "(default: keep it and save as <name>_2.xlsx, <name>_3.xlsx, ...)"
+        ),
     )
     parser.add_argument(
         "--reference",
@@ -160,7 +171,9 @@ def main() -> int:
 
     # ── Save output ────────────────────────────────────────────────────────────
     try:
-        out_path = save_output(result, output_dir=args.output, reference_data=reference_data)
+        out_path = save_output(
+            result, output_dir=args.output, reference_data=reference_data, overwrite=args.overwrite
+        )
     except IOError as exc:
         print(f"\n  ERROR saving output: {exc}", file=sys.stderr)
         return 1
@@ -169,6 +182,12 @@ def main() -> int:
         return 1
 
     print(f"\nDone. Output saved to:\n  {out_path}")
+    numbered = re.fullmatch(r"(.+)_\d+(\.xlsx)", os.path.basename(out_path))
+    if not args.overwrite and numbered:
+        kept = os.path.join(os.path.dirname(out_path), numbered.group(1) + numbered.group(2))
+        if os.path.exists(kept):
+            print(f"  (A file named {os.path.basename(kept)} already exists there and was kept; "
+                  "--overwrite replaces it.)")
     return 0
 
 

@@ -226,10 +226,10 @@ class TestDamagedContent:
         with pytest.raises(MapValidationError, match="F1 is") as info:
             load_map(wb_to_bytes(make_map_wb(CODES, sections=["MRT", "CT"])))
         assert info.value.recoverable is True
-        # formula text stays a FileValidationError
+        # a formula-like code stays a FileValidationError (a Leistung text is only left out)
         wb = make_stats_wb(ROWS, total_l8=1)
-        wb.active["D11"].value = "=1+1"
-        wb.active["D11"].data_type = "s"
+        wb.active["E11"].value = "=1+1"
+        wb.active["E11"].data_type = "s"
         with pytest.raises(FileValidationError, match="formula injection"):
             load_statistics(wb_to_bytes(wb))
 

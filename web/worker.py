@@ -40,7 +40,11 @@ import io
 import json
 import logging
 import os
+import re
 import sys
+import threading
+import unicodedata
+from urllib.parse import quote
 
 # Allow running as  python -m web.worker  from the project root.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -159,9 +163,71 @@ def _parse_multipart(body: bytes, content_type: str) -> dict[str, bytes]:
     return fields
 
 
+# ── Request body ───────────────────────────────────────────────────────────────
+
+async def _read_body(reader, limit: int) -> bytes | None:
+    """
+    The whole request body, or None as soon as it grows beyond `limit` bytes.
+
+    The Content-Length pre-check cannot be relied on (the header may be missing or
+    wrong), so the size is counted while reading and nothing more is kept once it
+    is exceeded.
+    """
+    if not hasattr(type(reader), "__aiter__"):          # an SDK without chunked reading
+        body = await reader.read_all()
+        return body if len(body) <= limit else None
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in reader:
+        total += len(chunk)
+        if total > limit:
+            chunks.clear()
+            close = getattr(reader, "close_async", None)
+            if close is not None:
+                try:
+                    await close()
+                except Exception:
+                    pass
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+# ── Conversion (runs in a thread) ──────────────────────────────────────────────
+
+# At most this many conversions at a time; each holds a whole upload in memory.
+_MAX_PARALLEL_CONVERSIONS = 2
+_CONVERSION_SLOTS = threading.BoundedSemaphore(_MAX_PARALLEL_CONVERSIONS)
+
+
+def _convert(stats_bytes: bytes) -> tuple[str, bytes]:
+    """statistics bytes → (file name, xlsx bytes), with the server-side map and reference."""
+    with _CONVERSION_SLOTS:
+        stats_data = load_statistics(io.BytesIO(stats_bytes))
+        result = process(stats_data, _MAP_DATA)          # server-side map loaded at startup
+        return build_xlsx_bytes(result, reference_data=_REFERENCE_DATA or None)
+
+
 # ── Response helpers ───────────────────────────────────────────────────────────
 
+# An error message quotes at most this many characters (a message can quote a cell).
+_MAX_ERROR_CHARS = 500
+
+
+def _content_disposition(filename: str) -> str:
+    """
+    attachment header for `filename`: an ASCII fallback for old clients plus the
+    exact UTF-8 name (RFC 6266 / RFC 5987), so umlauts survive.
+    """
+    # "Müller" → "Muller" (accents dropped), any other character → "_".
+    letters = "".join(c for c in unicodedata.normalize("NFKD", filename) if not unicodedata.combining(c))
+    fallback = re.sub(r"[^A-Za-z0-9._-]", "_", letters) or "Auswertung.xlsx"
+    return f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}"
+
+
 async def _send_json_error(res: HttpResponse, status: int, message: str) -> None:
+    if len(message) > _MAX_ERROR_CHARS:
+        message = message[: _MAX_ERROR_CHARS - 3] + "..."
     body = json.dumps({"error": message}).encode()
     await res.status(status)
     await res.headers({
@@ -197,14 +263,13 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
         except ValueError:
             pass  # malformed header — let the read proceed and check afterwards
 
-    # ── Read and size-check the request body ──────────────────────────────────
-    body = await req.request_body.read_all()
+    # ── Read the request body, stopping as soon as it is too large ────────────
+    body = await _read_body(req.request_body, _MAX_BODY_BYTES)
 
-    if len(body) > _MAX_BODY_BYTES:
+    if body is None:
         await _send_json_error(
             res, 413,
-            f"Upload too large ({len(body) // (1024 * 1024)} MB). "
-            f"Maximum upload size is {_MAX_BODY_BYTES // (1024 * 1024)} MB.",
+            f"Upload too large. Maximum upload size is {_MAX_BODY_BYTES // (1024 * 1024)} MB.",
         )
         return
 
@@ -219,8 +284,8 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
         )
         return
 
-    # ── Parse multipart ───────────────────────────────────────────────────────
-    fields = _parse_multipart(body, content_type)
+    # ── Parse multipart (in a thread: it takes a while for a large upload) ────
+    fields = await asyncio.to_thread(_parse_multipart, body, content_type)
     del body  # release the raw body from memory as early as possible
 
     if len(fields) > _MAX_FIELDS:
@@ -248,19 +313,17 @@ async def _process_request(req: HttpRequest, res: HttpResponse) -> None:
         )
         return
 
-    # ── Core processing (no disk I/O) ─────────────────────────────────────────
-    stats_data = load_statistics(io.BytesIO(stats_bytes))
-    map_data = _MAP_DATA        # server-side map loaded at startup
-    ref_data = _REFERENCE_DATA  # server-side reference loaded at startup
-    result = process(stats_data, map_data)
-    filename, xlsx_bytes = build_xlsx_bytes(result, reference_data=ref_data or None)
+    # ── Core processing (no disk I/O), in a thread ────────────────────────────
+    # Reading a large file takes seconds; in a thread the worker keeps answering
+    # other requests meanwhile, and the timeout can answer this one.
+    filename, xlsx_bytes = await asyncio.to_thread(_convert, stats_bytes)
 
     # ── Stream the response ───────────────────────────────────────────────────
     await res.status(200)
     await res.headers({
         **_SECURITY_HEADERS,
         "Content-Type": _XLSX_CONTENT_TYPE,
-        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Disposition": _content_disposition(filename),
         "Content-Length": str(len(xlsx_bytes)),
     })
 
