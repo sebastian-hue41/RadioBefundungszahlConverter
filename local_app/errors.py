@@ -41,18 +41,20 @@ from core.input_handler import (
 STATISTICS = "statistics"
 ALLRAD = "allrad"
 NRAD = "nrad"
-MAP_SLOTS = (ALLRAD, NRAD)
+MAPS = "maps"                 # the one field of the automatic mode, for maps of either department
+MAP_SLOTS = (ALLRAD, NRAD)    # the departments; an upload always names one of them per map
 SLOT_LABELS = {
     STATISTICS: "Mitarbeiterstatistik",
     ALLRAD: "Allrad-Map",
     NRAD: "NRAD-Map",
+    MAPS: "Leistungsmap",
 }
 
 
 def _kind(slot: str) -> str:
     if slot == STATISTICS:
         return "stats"
-    if slot in MAP_SLOTS:
+    if slot in MAP_SLOTS or slot == MAPS:
         return "map"
     raise ValueError(f"unknown file slot: {slot!r}")
 
@@ -111,18 +113,26 @@ _add("E211", "Die Map enthält keine Leistungen.",
      "Bitte die richtige Map wählen.")
 _add("E212", "Die Map hat zu viele Zeilen oder Spalten.",
      "Bitte die richtige Map wählen.")
+_add("E213", "Zwei Spalten der Map haben denselben Namen.",
+     "Bitte in der Map jedem Leistungsbereich einen eigenen Spaltennamen geben "
+     "(Name und Spalten stehen in den technischen Details).")
+_add("E214", "Die Map enthält Werte, die keine ganzen Zahlen sind.",
+     "In den Spalten der Leistungsbereiche sind nur leere Zellen und ganze Zahlen (0, 1, 2 …) "
+     "erlaubt. Die Zellen stehen in den technischen Details.")
 _add("E220", "Allrad- und NRAD-Map sind vertauscht.",
      "Bitte die beiden Dateien tauschen.")
 _add("E221", "Allrad- und NRAD-Map passen nicht zusammen.",
      "Bitte zusammengehörige Versionen wählen.")
+_add("E222", "Es wurden zwei Maps derselben Art gewählt.",
+     "Bitte je eine Allrad-Map und eine NRAD-Map wählen.")
 
 # Request and selection.
 _add("E301", "Kein Bereich ausgewählt.",
-     "Bitte Allrad, NRAD oder beides ankreuzen.")
+     "Bitte „Alles“, „Nur NRAD-Codes“ oder „Nur Allrad-Codes“ wählen.")
 _add("E302", "Es fehlt eine Datei.",
      "Bitte die markierte Datei wählen.")
 _add("E303", "Diese Statistik enthält keine {dept}.",
-     "Bitte die Häkchen anpassen.")
+     "Bitte bei „Was auswerten?“ eine andere Auswahl treffen, zum Beispiel „Alles“.")
 _add("E304", "Die Übertragung war unvollständig.",
      "Bitte noch einmal versuchen.")
 _add("E305", "Die Dateien sind zusammen zu groß.",
@@ -192,7 +202,7 @@ class AppError(Exception):
 # from the slot: series 1 for the statistics, series 2 for a map.
 _FILE_KEYS = {"unreadable": 0, "invalid": 1, "empty": 2, "toolarge": 3, "macros": 4, "security": 5}
 _STATS_KEYS = {"not_stats": "E110", "column": "E111", "no_rows": "E112", "too_many_rows": "E113"}
-_MAP_KEYS = {"not_map": "E210", "map_empty": "E211", "map_big": "E212"}
+_MAP_KEYS = {"not_map": "E210", "map_empty": "E211", "map_big": "E212", "map_names": "E213", "map_values": "E214"}
 
 
 def _code_for(key: str, kind: str) -> str:
@@ -239,6 +249,8 @@ _CORE_PREFIXES = (
     ("No section columns", "not_map"),
     ("Map file contains", "map_big"),
     ("Map file exceeds maximum allowed row count", "map_big"),
+    ("Duplicate section name in map", "map_names"),
+    ("Invalid value in map", "map_values"),
 )
 
 # Exceptions a damaged file makes the parser raise instead of a message of ours.
@@ -313,6 +325,8 @@ HINTS: dict[str, tuple[str, str]] = {
     "W102": _same("Mitarbeiter oder Befunddatum fehlen; der Dateiname ist allgemein."),
     "W103": _same("Die Zählerprüfung war nicht möglich."),
     "W104": _same("Die Anzahl der Leistungen weicht vom Erwarteten ab."),
+    "W105": ("Bei 1 Leistungscode sieht der Leistungsname wie eine Formel aus; in der Excel steht der Code statt des Namens.",
+             "Bei {n} Leistungscodes sieht der Leistungsname wie eine Formel aus; in der Excel steht der Code statt des Namens."),
     "W201": ("1 Leistungscode fehlt in der Map (eigene Zeile in der Excel).",
              "{n} Leistungscodes fehlen in der Map (eigene Zeilen in der Excel)."),
     "W202": ("1 Leistung hat keine Zuordnung (am Ende der Excel aufgelistet).",
@@ -325,7 +339,7 @@ HINTS: dict[str, tuple[str, str]] = {
     "W900": ("1 weiterer Hinweis (siehe Excel, „Hinweise und Fehler“).",
              "{n} weitere Hinweise (siehe Excel, „Hinweise und Fehler“)."),
 }
-_COUNTED = {"W101", "W201", "W202", "W401", "W900"}
+_COUNTED = {"W101", "W105", "W201", "W202", "W401", "W900"}
 _UNASSIGNED_COUNT = re.compile(r"NICHT ZUGEORDNET:\s*([\d.,]+)")
 
 
@@ -349,6 +363,8 @@ def classify_hint(text: str) -> str | None:
         return "W103"
     if text.startswith("WARNING: Row ") and "row skipped" in text:
         return "W101"
+    if text.startswith("WARNING: The Leistung text of ") and "looks like a formula" in text:
+        return "W105"
     if text.startswith("NOTE: Leistung ") and "not found in map" in text:
         return "W201"
     if text.startswith("NICHT ZUGEORDNET:"):

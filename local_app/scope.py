@@ -2,9 +2,10 @@
 scope.py — which department's Leistungen an evaluation includes.
 
 Allrad (general radiology) and NRAD (neuroradiology) work in the same RIS, but the
-NRAD codes all start with "N" and have their own map. The user ticks Allrad,
-NRAD or both; this module narrows the loaded statistics to that selection
-before core's process() runs, so core/ needs no change.
+NRAD codes all start with "N" and have their own map. The user chooses everything,
+only the NRAD codes or only the Allrad codes; this module narrows the loaded
+statistics to that selection before core's process() runs, so core/ needs no
+change, and tells which department a map belongs to.
 
 Pure functions on the dicts core/input_handler.py returns; no I/O.
 """
@@ -75,30 +76,40 @@ def apply_scope(stats: dict, include_allrad: bool, include_nrad: bool) -> dict:
 
 # ── Two maps ───────────────────────────────────────────────────────────────────
 
+def department_of(map_data: dict) -> tuple[str, int, int]:
+    """
+    Which department a loaded map belongs to: (ALLRAD or NRAD, its N codes, all its codes).
+
+    An NRAD map is recognised by its codes: at least half of them start with "N" (the
+    real NRAD map: all 115). An Allrad map has few (the real one: 52 of 3,166), so a
+    handful of N codes in an Allrad map is fine. The automatic mode of the page sorts
+    the maps with this rule, and check_department refuses a map in the wrong field by it.
+    """
+    codes = list(map_data["leistungen"])
+    n_codes = sum(1 for code in codes if is_nrad_code(code))
+    share = n_codes / len(codes) if codes else 0.0
+    return (NRAD if share >= _SHARE_LIMIT else ALLRAD), n_codes, len(codes)
+
+
 def check_department(map_data: dict, slot: str) -> None:
     """
     Refuse a map that was put into the wrong field.
 
-    The maps are picked by hand, and a swapped pair would silently give nearly empty
-    results: the NRAD codes would not be found in the Allrad map and the other way
-    round. An NRAD map is recognised by its codes: at least half of them start with
-    "N" (the real NRAD map: all 115). An Allrad map has few (the real one: 52 of
-    3,166), so a handful of N codes in an Allrad map is fine.
+    The maps can be assigned by hand, and a swapped pair would silently give nearly
+    empty results: the NRAD codes would not be found in the Allrad map and the other
+    way round. The department of a map follows from its codes (department_of).
 
     Raises AppError E220 for `slot` when the map belongs to the other field.
     """
     if slot not in (ALLRAD, NRAD):
         raise ValueError(f"not a map slot: {slot!r}")
-    codes = list(map_data["leistungen"])
-    n_codes = sum(1 for code in codes if is_nrad_code(code))
-    share = n_codes / len(codes) if codes else 0.0
-    is_nrad_map = share >= _SHARE_LIMIT
-    if is_nrad_map == (slot == NRAD):
+    department, n_codes, total = department_of(map_data)
+    if department == slot:
         return
-    looks_like = "NRAD" if is_nrad_map else "Allrad"
+    looks_like = "NRAD" if department == NRAD else "Allrad"
     raise AppError(
         "E220", slot,
-        f"{n_codes} von {len(codes)} Codes der Datei beginnen mit „{NRAD_PREFIX}“; "
+        f"{n_codes} von {total} Codes der Datei beginnen mit „{NRAD_PREFIX}“; "
         f"sie sieht wie eine {looks_like}-Map aus, steht aber im Feld „{SLOT_LABELS[slot]}“.",
     )
 

@@ -13,6 +13,7 @@ from local_app.errors import (
     ALLRAD,
     CATALOG,
     HINTS,
+    MAPS,
     NRAD,
     SELECTION_NOTE_PREFIX,
     SLOT_LABELS,
@@ -41,15 +42,16 @@ from tests.helpers import (
 
 from .helpers import DEFAULT_CODES, DEFAULT_ROWS, SHEET, force_text, map_bytes, patch_zip, stats_bytes, with_doctype
 
-SLOTS = [STATISTICS, ALLRAD, NRAD]
+SLOTS = [STATISTICS, ALLRAD, NRAD, MAPS]
+MAP_FIELDS = [ALLRAD, NRAD, MAPS]
 
 EXPECTED_CODES = {
     "E100", "E101", "E102", "E103", "E104", "E105", "E110", "E111", "E112", "E113",
-    "E200", "E201", "E202", "E203", "E204", "E205", "E210", "E211", "E212", "E220", "E221",
+    "E200", "E201", "E202", "E203", "E204", "E205", "E210", "E211", "E212", "E213", "E214", "E220", "E221", "E222",
     "E301", "E302", "E303", "E304", "E305", "E306", "E307",
     "E901", "E902", "E903", "E999",
 }
-EXPECTED_HINTS = {"W101", "W102", "W103", "W104", "W201", "W202", "W301", "W302", "W401", "W900"}
+EXPECTED_HINTS = {"W101", "W102", "W103", "W104", "W105", "W201", "W202", "W301", "W302", "W401", "W900"}
 
 
 def series(slot):
@@ -177,12 +179,33 @@ class TestFileLevelProblems:
         assert err.code == series(slot) + "03"
         assert "too large" in err.detail
 
-    def test_formula_text_in_a_statistics_cell(self):
+    def test_formula_text_as_a_statistics_code(self):
         wb = make_stats_wb(DEFAULT_ROWS)
-        force_text(wb.active["D11"], "=1+1")
+        force_text(wb.active["E11"], "=1+1")
         err = raised(STATISTICS, wb_to_bytes(wb))
         assert err.code == "E105"
         assert "formula injection" in err.detail
+
+    def test_formula_text_as_a_leistung_name_is_only_a_hint(self):
+        # core leaves such a name out (the code stands in for it) instead of refusing the file
+        wb = make_stats_wb(DEFAULT_ROWS, total_l8=1)
+        force_text(wb.active["D11"], "=1+1")
+        stats = input_handler.load_statistics(wb_to_bytes(wb))
+        assert [h["code"] for h in summarize_hints(stats["errors"])] == ["W105"]
+
+    @pytest.mark.parametrize("slot", MAP_FIELDS)
+    def test_two_section_columns_with_one_name(self, slot):
+        wb = make_map_wb(DEFAULT_CODES, sections=["DL Gefäße", "MRT", "MRT"])
+        err = raised(slot, wb_to_bytes(wb))
+        assert err.code == "E213" and err.slot == slot and "columns G and H" in err.detail
+
+    @pytest.mark.parametrize("slot", MAP_FIELDS)
+    @pytest.mark.parametrize("value", [1.5, -1, "x"])
+    def test_a_section_value_that_is_no_whole_number(self, slot, value):
+        wb = make_map_wb(DEFAULT_CODES)
+        wb.active["G2"] = value
+        err = raised(slot, wb_to_bytes(wb))
+        assert err.code == "E214" and err.slot == slot and "G2 = " in err.detail
 
     @pytest.mark.parametrize("slot", [ALLRAD, NRAD])
     def test_formula_text_as_a_map_code(self, slot):
@@ -481,6 +504,19 @@ class TestHints:
 
     def test_selection_note_is_not_a_hint(self):
         assert summarize_hints([f"{SELECTION_NOTE_PREFIX} Bereiche: Allrad; Map: map.xlsx"]) == []
+
+    def test_names_that_look_like_formulas_are_counted_per_code(self):
+        rows = [(1, 1, "01.01.2024", "-a", "MRTS"), (2, 1, "01.01.2024", "-a", "MRTS"), (3, 1, "01.01.2024", "@b", "ZZ1")]
+        result = evaluate(rows, DEFAULT_CODES, total_l8=3)
+        hints = by_code(summarize_hints(result["errors"]))
+        assert hints["W105"]["count"] == 2 and hints["W105"]["text"].startswith("Bei 2 Leistungscodes")
+        assert hints["W201"]["count"] == 1                    # ZZ1 is not in the map: its own row, named by its code
+
+    def test_a_missing_code_with_a_taken_name_is_still_one_missing_code(self):
+        # core adds the code to the row name then; the note has another ending but is the same hint
+        rows = [(1, 1, "01.01.2024", "MRT", "ZZ1"), (2, 1, "01.01.2024", "MRT", "ZZ2")]
+        result = evaluate(rows, DEFAULT_CODES, total_l8=2)
+        assert by_code(summarize_hints(result["errors"]))["W201"]["count"] == 2
 
     def test_unknown_message_is_not_lost(self):
         hints = summarize_hints(["something nobody translated", "and another one"])

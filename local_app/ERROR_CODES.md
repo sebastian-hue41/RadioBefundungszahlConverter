@@ -32,11 +32,14 @@ This file is generated from `local_app/errors.py`; a test fails if the two diffe
 | E210 | Das ist keine Leistungsmap. | Bitte die richtige Map wählen. Wurde versehentlich die Statistik gewählt? |
 | E211 | Die Map enthält keine Leistungen. | Bitte die richtige Map wählen. |
 | E212 | Die Map hat zu viele Zeilen oder Spalten. | Bitte die richtige Map wählen. |
+| E213 | Zwei Spalten der Map haben denselben Namen. | Bitte in der Map jedem Leistungsbereich einen eigenen Spaltennamen geben (Name und Spalten stehen in den technischen Details). |
+| E214 | Die Map enthält Werte, die keine ganzen Zahlen sind. | In den Spalten der Leistungsbereiche sind nur leere Zellen und ganze Zahlen (0, 1, 2 …) erlaubt. Die Zellen stehen in den technischen Details. |
 | E220 | Allrad- und NRAD-Map sind vertauscht. | Bitte die beiden Dateien tauschen. |
 | E221 | Allrad- und NRAD-Map passen nicht zusammen. | Bitte zusammengehörige Versionen wählen. |
-| E301 | Kein Bereich ausgewählt. | Bitte Allrad, NRAD oder beides ankreuzen. |
+| E222 | Es wurden zwei Maps derselben Art gewählt. | Bitte je eine Allrad-Map und eine NRAD-Map wählen. |
+| E301 | Kein Bereich ausgewählt. | Bitte „Alles“, „Nur NRAD-Codes“ oder „Nur Allrad-Codes“ wählen. |
 | E302 | Es fehlt eine Datei. | Bitte die markierte Datei wählen. |
-| E303 | Diese Statistik enthält keine {dept}. | Bitte die Häkchen anpassen. |
+| E303 | Diese Statistik enthält keine {dept}. | Bitte bei „Was auswerten?“ eine andere Auswahl treffen, zum Beispiel „Alles“. |
 | E304 | Die Übertragung war unvollständig. | Bitte noch einmal versuchen. |
 | E305 | Die Dateien sind zusammen zu groß. | Bitte die richtigen Dateien wählen. |
 | E306 | Die Datei konnte im Browser nicht gelesen werden. | Sie liegt eventuell nur in der Cloud oder wurde inzwischen geändert. Bitte lokal speichern und neu wählen. |
@@ -54,6 +57,7 @@ This file is generated from `local_app/errors.py`; a test fails if the two diffe
 | W102 | Mitarbeiter oder Befunddatum fehlen; der Dateiname ist allgemein. |
 | W103 | Die Zählerprüfung war nicht möglich. |
 | W104 | Die Anzahl der Leistungen weicht vom Erwarteten ab. |
+| W105 | Bei 1 Leistungscode sieht der Leistungsname wie eine Formel aus; in der Excel steht der Code statt des Namens. / Bei N Leistungscodes sieht der Leistungsname wie eine Formel aus; in der Excel steht der Code statt des Namens. |
 | W201 | 1 Leistungscode fehlt in der Map (eigene Zeile in der Excel). / N Leistungscodes fehlen in der Map (eigene Zeilen in der Excel). |
 | W202 | 1 Leistung hat keine Zuordnung (am Ende der Excel aufgelistet). / N Leistungen haben keine Zuordnung (am Ende der Excel aufgelistet). |
 | W301 | Soll-Werte konnten nicht geladen werden; die Spalte „Benötigt“ fehlt. |

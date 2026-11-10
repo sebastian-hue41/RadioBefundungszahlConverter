@@ -218,6 +218,16 @@ def run(path):
         status, headers, data = program.call("POST", "reset")
         check("reset works: the result is gone", status == 200 and program.call("GET", "download")[0] == 404 and json.loads(program.call("GET", "download")[2])["error"]["code"] == "E901")
 
+        # the automatic mode of the page: each map is sent alone and recognised
+        found = {}
+        for data in (nrad, allrad, stats):
+            status, _, reply = program.call("POST", "identify", data, headers={"Origin": f"http://{program.host}"})
+            found[len(found)] = (status, json.loads(reply))
+        check("the automatic mode recognises an NRAD and an Allrad map",
+              [found[i][1].get("map", {}).get("department") for i in (0, 1)] == ["nrad", "allrad"], str(found)[:200])
+        check("... and refuses the statistics as no map (E210 for the field of the maps)",
+              found[2][0] == 422 and found[2][1]["error"]["code"] == "E210" and found[2][1]["error"]["slot"] == "maps", str(found[2])[:200])
+
         for label, files, code, slot in (
             ("a corrupt file", {"statistics": b"this is not a workbook", "allrad": allrad}, "E101", "statistics"),
             ("a file with an XML entity", {"statistics": with_doctype(stats), "allrad": allrad}, "E105", "statistics"),

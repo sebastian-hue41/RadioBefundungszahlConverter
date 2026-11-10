@@ -68,6 +68,9 @@
   .choices label { display: inline-flex; align-items: center; gap: .5rem; cursor: pointer; }
   .choices input { width: 1.15rem; height: 1.15rem; accent-color: var(--accent); }
   .step.invalid legend { color: var(--error); }
+  .map-list { margin: .5rem 0 0; padding: 0; list-style: none; }
+  .map-list li { margin: 0 0 .2rem; overflow-wrap: anywhere; }
+  .map-list .unused { color: var(--muted); }
 
   .actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem; }
   .status { margin: 0; color: var(--muted); }
@@ -176,16 +179,25 @@
         </div>
       </div>
 
-      <fieldset class="step" id="step-departments">
-        <legend><span class="num" aria-hidden="true">2</span>Welche Bereiche?</legend>
+      <fieldset class="step" id="step-scope">
+        <legend><span class="num" aria-hidden="true">2</span>Was auswerten?</legend>
         <div class="choices">
-          <label for="use-allrad"><input type="checkbox" id="use-allrad" checked>Allrad</label>
-          <label for="use-nrad"><input type="checkbox" id="use-nrad" checked>NRAD</label>
+          <label for="scope-all"><input type="radio" name="scope" id="scope-all" value="all" checked>Alles</label>
+          <label for="scope-nrad"><input type="radio" name="scope" id="scope-nrad" value="nrad">Nur NRAD-Codes</label>
+          <label for="scope-allrad"><input type="radio" name="scope" id="scope-allrad" value="allrad">Nur Allrad-Codes</label>
         </div>
       </fieldset>
 
       <div class="step" id="step-maps">
-        <h2><span class="num" aria-hidden="true">3</span>Leistungsmaps</h2>
+        <h2 id="h-maps"><span class="num" aria-hidden="true">3</span>Leistungsmaps</h2>
+        <div class="field" id="field-maps" data-slot="maps">
+          <label class="drop" id="drop-maps" for="file-maps">
+            <span class="drop-main" id="text-maps">Map-Dateien wählen oder hierher ziehen</span>
+            <span class="drop-sub" id="sub-maps"></span>
+            <input class="sr-only" type="file" id="file-maps" accept=".xlsx" multiple aria-labelledby="h-maps text-maps sub-maps">
+          </label>
+          <ul class="map-list" id="map-list" aria-live="polite"></ul>
+        </div>
         <div class="field" id="field-allrad" data-slot="allrad">
           <span class="field-name" id="h-allrad">Allrad-Map</span>
           <label class="drop" id="drop-allrad" for="file-allrad">
@@ -202,6 +214,7 @@
             <input class="sr-only" type="file" id="file-nrad" accept=".xlsx" aria-labelledby="h-nrad text-nrad sub-nrad">
           </label>
         </div>
+        <button type="button" id="mode-switch" class="link small-print">Maps selbst zuordnen</button>
       </div>
 
       <div class="actions">
@@ -274,11 +287,17 @@
   const catalog = JSON.parse(document.getElementById("catalog").textContent);
   const $ = (id) => document.getElementById(id);
   const MAPS = ["allrad", "nrad"];
+  const FIELDS = ["statistics", ...MAPS, "maps"];
+  // What each choice of "Was auswerten?" evaluates, and so which maps it needs.
+  const SCOPES = { all: ["allrad", "nrad"], nrad: ["nrad"], allrad: ["allrad"] };
+  const ONLY = { allrad: "„Nur Allrad-Codes“", nrad: "„Nur NRAD-Codes“" };
   const state = {
     files: { statistics: null, allrad: null, nrad: null },
-    use: { allrad: true, nrad: true },
-    busy: false, closed: false, hasResult: false, downloaded: false, summary: null,
+    found: { allrad: null, nrad: null },     // what the program recognised in a map (automatic mode)
+    scope: "all", auto: true,                // "Alles" and the automatic mode are the start
+    busy: false, identifying: false, closed: false, hasResult: false, downloaded: false, summary: null,
   };
+  const needed = () => SCOPES[state.scope];
 
   // ── Wording: everything comes from the catalog the server put into the page ──
   const number = new Intl.NumberFormat("de-DE");
@@ -300,20 +319,22 @@
   }
 
   // ── The error box ─────────────────────────────────────────────────────────
+  // The field to mark: in the automatic mode both maps sit in the one field "maps".
   function invalidTargets(error) {
-    if (error.slot) return [error.slot];
-    if (error.code === "E221") return MAPS;
+    if (error.slot === "maps" || error.code === "E222") return ["maps"];
+    if (error.slot) return MAPS.includes(error.slot) && state.auto ? ["maps"] : [error.slot];
+    if (error.code === "E221") return state.auto ? ["maps"] : MAPS;
     return [];
   }
 
   function clearError() {
     $("error").hidden = true;
-    for (const slot of ["statistics", ...MAPS]) {
+    for (const slot of FIELDS) {
       $("field-" + slot).classList.remove("invalid");
       $("file-" + slot).removeAttribute("aria-invalid");
       $("file-" + slot).removeAttribute("aria-describedby");
     }
-    $("step-departments").classList.remove("invalid");
+    $("step-scope").classList.remove("invalid");
     $("error").dataset.slot = "";
   }
 
@@ -333,7 +354,7 @@
       $("file-" + slot).setAttribute("aria-invalid", "true");
       $("file-" + slot).setAttribute("aria-describedby", "error");
     }
-    if (error.code === "E301" || error.code === "E303") $("step-departments").classList.add("invalid");
+    if (error.code === "E301" || error.code === "E303") $("step-scope").classList.add("invalid");
     $("error").dataset.slot = targets.join(" ");
     $("error").hidden = false;
     $("error").focus();
@@ -344,8 +365,18 @@
   function missing() {
     const list = [];
     if (!state.files.statistics) list.push(catalog.slots.statistics);
-    for (const slot of MAPS) if (state.use[slot] && !state.files[slot]) list.push(catalog.slots[slot]);
+    for (const slot of needed()) if (!state.files[slot]) list.push(catalog.slots[slot]);
     return list;
+  }
+
+  // "Alles" with one of the two maps: name the other one, or the choice that needs only the one there is.
+  function statusText(lacking) {
+    if (state.identifying) return "Map wird erkannt …";
+    if (state.busy) return "Bitte kurz warten …";
+    if (!lacking.length) return "Bereit zum Auswerten.";
+    const present = MAPS.filter((slot) => state.files[slot]);
+    const alternative = state.scope === "all" && present.length === 1 ? " – oder " + ONLY[present[0]] + " wählen" : "";
+    return "Es fehlt noch: " + lacking.join(", ") + alternative;
   }
 
   function renderFile(slot) {
@@ -355,23 +386,40 @@
     $("sub-" + slot).textContent = file ? fileSize(file.size) + " · zum Ändern klicken oder eine andere Datei hierher ziehen" : "";
   }
 
+  function renderMapList() {
+    const present = MAPS.filter((slot) => state.files[slot]);
+    $("drop-maps").classList.toggle("has-file", present.length > 0);
+    $("sub-maps").textContent = state.identifying ? "Wird erkannt …"
+      : present.length ? "Zum Ersetzen eine andere Map hierher ziehen"
+      : "Allrad- und NRAD-Map, einzeln oder beide zusammen – sie werden automatisch erkannt";
+    $("map-list").replaceChildren();
+    for (const slot of present) {
+      const item = document.createElement("li");
+      const found = state.found[slot];
+      let text = "✓ " + state.files[slot].name + " – " + catalog.slots[slot];
+      if (found && typeof found.codes === "number") text += " · " + number.format(found.codes) + " Codes";
+      if (!needed().includes(slot)) {                    // only with "Nur …-Codes"
+        text += " · bei " + ONLY[state.scope] + " nicht verwendet";
+        item.className = "unused";
+      }
+      item.textContent = text;
+      $("map-list").append(item);
+    }
+  }
+
   function render() {
     for (const slot of ["statistics", ...MAPS]) renderFile(slot);
-    for (const slot of MAPS) $("field-" + slot).hidden = !state.use[slot];
-    $("step-maps").hidden = !(state.use.allrad || state.use.nrad);
+    renderMapList();
+    $("field-maps").hidden = !state.auto;
+    for (const slot of MAPS) $("field-" + slot).hidden = state.auto || !needed().includes(slot);
+    $("mode-switch").textContent = state.auto ? "Maps selbst zuordnen" : "Maps automatisch erkennen";
+    $("scope-" + state.scope).checked = true;
 
-    const anyDepartment = state.use.allrad || state.use.nrad;
     const lacking = missing();
-    let text;
-    if (state.busy) text = "Bitte kurz warten …";
-    else if (!anyDepartment) text = "Bitte mindestens einen Bereich ankreuzen.";
-    else if (lacking.length) text = "Es fehlt noch: " + lacking.join(", ");
-    else text = "Bereit zum Auswerten.";
-    $("status").textContent = text;
-
-    $("submit").disabled = state.busy || !anyDepartment || lacking.length > 0;
-    $("submit").textContent = state.busy ? "Wird ausgewertet …" : "Auswerten";
-    for (const id of ["file-statistics", "file-allrad", "file-nrad", "use-allrad", "use-nrad"]) $(id).disabled = state.busy;
+    $("status").textContent = statusText(lacking);
+    $("submit").disabled = state.busy || lacking.length > 0;
+    $("submit").textContent = state.busy && !state.identifying ? "Wird ausgewertet …" : "Auswerten";
+    for (const id of ["file-statistics", "file-allrad", "file-nrad", "file-maps", "scope-all", "scope-nrad", "scope-allrad", "mode-switch"]) $(id).disabled = state.busy;
     $("form").setAttribute("aria-busy", String(state.busy));
   }
 
@@ -385,6 +433,7 @@
   function setFile(slot, file) {
     if (state.busy || state.closed) return;
     state.files[slot] = file;
+    if (slot in state.found) state.found[slot] = null;       // put there by hand: not recognised
     if (($("error").dataset.slot || "").split(" ").includes(slot)) clearError();
     render();
   }
@@ -393,12 +442,66 @@
     $("sub-" + slot).textContent = text;
   }
 
-  for (const slot of ["statistics", ...MAPS]) {
+  // The automatic mode: every map is sent alone to the program, which says whether it is an Allrad or an NRAD
+  // map (or why it is no map). All of one choice or drop are taken, or none: two of one kind are refused (E222).
+  function mapError(error, file) {
+    return { ...error, title: "„" + file.name + "“: " + error.title };
+  }
+
+  async function addMaps(files) {
+    if (state.busy || state.closed || !files.length) return;
+    clearError();
+    for (const file of files) {
+      if (file.size > catalog.limits.file_bytes) { showError(mapError(appError("E203", "maps"), file)); return; }
+    }
+    state.busy = state.identifying = true;
+    render();
+    const found = {};
+    try {
+      for (const file of files) {
+        let content;
+        try {
+          content = await file.arrayBuffer();
+        } catch (unreadable) {
+          showError(mapError(appError("E306", "maps"), file));
+          return;
+        }
+        const reply = await readReply(await fetch("identify", { method: "POST", body: content }));
+        if (!reply || !reply.ok || !reply.map || !MAPS.includes(reply.map.department)) {
+          showError(mapError(reply && reply.error && reply.error.code ? reply.error : appError("E902"), file));
+          return;
+        }
+        const slot = reply.map.department;
+        if (found[slot]) {
+          showError(appError("E222", "maps", "„" + found[slot].file.name + "“ und „" + file.name + "“ sind beide eine " + catalog.slots[slot] + "."));
+          return;
+        }
+        found[slot] = { file, map: reply.map };
+      }
+      for (const slot of Object.keys(found)) {             // a map of a kind that is already there replaces it
+        state.files[slot] = found[slot].file;
+        state.found[slot] = found[slot].map;
+      }
+    } catch (lost) {
+      showError(appError("E902"));
+    } finally {
+      state.busy = state.identifying = false;
+      if (!state.closed) render();
+    }
+  }
+
+  for (const slot of ["statistics", ...MAPS, "maps"]) {
     const input = $("file-" + slot);
     const drop = $("drop-" + slot);
+    const take = (files) => {
+      if (slot === "maps") addMaps(files);
+      else if (files.length === 1) setFile(slot, files[0]);
+      else if (files.length > 1) note(slot, "Bitte nur eine Datei hierher ziehen.");
+    };
     input.addEventListener("change", () => {
-      if (input.files && input.files[0]) setFile(slot, input.files[0]);
+      const chosen = input.files ? [...input.files] : [];
       input.value = "";                    // the same file can be chosen again, e.g. after it was fixed
+      take(chosen);
     });
     drop.addEventListener("dragover", (event) => {
       event.preventDefault();
@@ -411,9 +514,7 @@
       event.stopPropagation();
       drop.classList.remove("over");
       if (state.busy || state.closed) return;
-      const dropped = event.dataTransfer ? event.dataTransfer.files : [];
-      if (dropped.length === 1) setFile(slot, dropped[0]);
-      else if (dropped.length > 1) note(slot, "Bitte nur eine Datei hierher ziehen.");
+      take(event.dataTransfer ? [...event.dataTransfer.files] : []);
     });
   }
 
@@ -425,13 +526,17 @@
   });
   window.addEventListener("drop", (event) => event.preventDefault());
 
-  for (const slot of MAPS) {
-    $("use-" + slot).addEventListener("change", () => {
-      state.use[slot] = $("use-" + slot).checked;
-      if ($("step-departments").classList.contains("invalid")) clearError();
+  for (const scope of Object.keys(SCOPES)) {
+    $("scope-" + scope).addEventListener("change", () => {
+      if (!$("scope-" + scope).checked) return;
+      state.scope = scope;
+      if ($("step-scope").classList.contains("invalid")) clearError();
       render();
     });
   }
+
+  // Automatic recognition, or each map in its own field: the maps chosen so far stay where they are.
+  $("mode-switch").addEventListener("click", () => { if (state.busy) return; state.auto = !state.auto; clearError(); render(); });
 
   // ── Sending ───────────────────────────────────────────────────────────────
   async function readReply(response) {
@@ -443,7 +548,7 @@
   }
 
   function selectionProblem(slots) {
-    if (!state.use.allrad && !state.use.nrad) return appError("E301");
+    if (!SCOPES[state.scope]) return appError("E301");
     for (const slot of slots) {
       if (!state.files[slot]) return appError("E302", slot);
     }
@@ -460,7 +565,7 @@
   async function evaluateFiles() {
     if (state.busy || state.closed) return;
     clearError();
-    const slots = ["statistics", ...MAPS.filter((slot) => state.use[slot])];
+    const slots = ["statistics", ...needed()];
     const problem = selectionProblem(slots);
     if (problem) { showError(problem); return; }
 

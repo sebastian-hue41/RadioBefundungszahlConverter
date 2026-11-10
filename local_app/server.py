@@ -48,6 +48,7 @@ from .errors import (
     CATALOG,
     HINTS,
     MAP_SLOTS,
+    MAPS,
     NRAD,
     SELECTION_NOTE_PREFIX,
     SLOT_LABELS,
@@ -59,7 +60,7 @@ from .errors import (
     summarize_hints,
     unexpected_error,
 )
-from .scope import apply_scope, check_department, merge_maps
+from .scope import apply_scope, check_department, department_of, merge_maps
 from .security import assert_no_formulas, safe_name, scan_xlsx
 
 _SELECTION_LABELS = {ALLRAD: "Allrad", NRAD: "NRAD"}
@@ -72,6 +73,7 @@ _PREVIEW_MAX_COLUMNS = 40
 #   ?stats=<bytes>&allrad=<bytes>&nrad=<bytes>&allrad_name=<text>&nrad_name=<text>
 # The maps that are present decide which departments are evaluated.
 MAX_BODY_BYTES = 3 * MAX_FILE_SIZE_MB * 1024 * 1024 + 1024 * 1024   # three files at the limit, plus a margin
+MAX_MAP_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024                       # one map, sent alone to be recognised
 _SIZE_PARAMS = {STATISTICS: "stats", ALLRAD: "allrad", NRAD: "nrad"}   # in the order of the body
 _NAME_PARAMS = {ALLRAD: "allrad_name", NRAD: "nrad_name"}
 _SIZE = re.compile(r"[0-9]{1,12}")                                    # ASCII digits only: no sign, no exponent
@@ -266,6 +268,37 @@ def _evaluate(files: dict[str, bytes], names: Mapping[str, str], reference_data:
     return Evaluation(filename, data, summary)
 
 
+# ── Recognising a map (the automatic mode of the page) ─────────────────────────
+
+def identify_map(data: bytes) -> dict:
+    """
+    Which department the map `data` belongs to, so that the page can sort the maps
+    the user drops into its one field and say which one is still missing.
+
+    The file goes through the same checks as in an evaluation (scan_xlsx, load_map),
+    reported for the field MAPS; the department follows from its codes (department_of,
+    the rule the swapped-map guard uses). Nothing is kept: the evaluation receives the
+    map again and checks it again.
+
+    Returns {"department": "allrad" | "nrad", "label": "Allrad-Map" | "NRAD-Map",
+    "codes": number of codes, "sections": number of sections}. Raises AppError E2xx
+    (field MAPS) for a file that is no usable map, E999 for anything unforeseen.
+    """
+    content = _as_bytes(MAPS, data)
+    try:
+        scan_xlsx(content, MAPS)
+        try:
+            loaded = load_map(content)
+        except Exception as exc:
+            raise from_core_error(exc, MAPS) from exc
+        department, _, codes = department_of(loaded)
+        return {"department": department, "label": SLOT_LABELS[department], "codes": codes, "sections": len(loaded["sections"])}
+    except AppError:
+        raise
+    except Exception as exc:
+        raise unexpected_error(exc) from exc
+
+
 # ── Splitting an upload ────────────────────────────────────────────────────────
 
 def _one_value(params: list[tuple[str, str]], name: str) -> str | None:
@@ -334,6 +367,7 @@ def split_upload(body: bytes, query: "str | Mapping[str, str]") -> tuple[dict[st
 # All routes sit under a random per-launch prefix: /<token>/
 #
 #   GET  /<token>/           the page
+#   POST /<token>/identify   one map as the body; which department it is (identify_map)
 #   POST /<token>/evaluate   the upload (see split_upload); JSON summary or error
 #   GET  /<token>/download   the latest Excel
 #   POST /<token>/reset      forget the latest result
@@ -557,6 +591,7 @@ class _Handler(BaseHTTPRequestHandler):
         "/": {"GET": "_page"},
         "/download": {"GET": "_download"},
         "/evaluate": {"POST": "_evaluate"},
+        "/identify": {"POST": "_identify"},     # automatic mode: is this map an Allrad or an NRAD map?
         "/reset": {"POST": "_reset"},
         "/shutdown": {"POST": "_shutdown"},
         "/status": {"GET": "_status"},          # read-only: asking does not count as use
@@ -635,15 +670,16 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
         self.server.shutdown_soon()
 
-    def _content_length(self) -> int:
+    def _content_length(self, limit: int = MAX_BODY_BYTES, too_large: str = "E305", slot: str | None = None) -> int:
+        """The declared length of the body; `too_large` (with `slot`) when it is over `limit`, before anything is read."""
         if self.headers.get("Transfer-Encoding") is not None:
             raise AppError("E304", detail="Die Anfrage darf nicht in Teilen gesendet werden.")
         values = self.headers.get_all("Content-Length") or []
         if len(values) != 1 or not _LENGTH.fullmatch(values[0].strip()):
             raise AppError("E304", detail="Die Längenangabe der Anfrage fehlt oder ist ungültig.")
         length = int(values[0])
-        if length > MAX_BODY_BYTES:
-            raise AppError("E305", detail=f"{length:,} Bytes angekündigt; erlaubt sind {MAX_BODY_BYTES:,}.")
+        if length > limit:
+            raise AppError(too_large, slot, f"{length:,} Bytes angekündigt; erlaubt sind {limit:,}.")
         return length
 
     def _read_body(self, length: int) -> bytes:
@@ -654,6 +690,22 @@ class _Handler(BaseHTTPRequestHandler):
         if len(body) != length:
             raise AppError("E304", detail=f"Angekündigt: {length:,} Bytes, empfangen: {len(body):,}.")
         return body
+
+    def _identify(self, query: str) -> None:
+        state = self.server.state
+        if not state.busy.acquire(blocking=False):
+            return self._app_error(AppError("E307"))      # one file is parsed at a time, as in an evaluation
+        try:
+            try:
+                length = self._content_length(MAX_MAP_BYTES, "E203", MAPS)
+                found = identify_map(self._read_body(length))
+            except AppError as error:
+                return self._app_error(error)
+            except Exception as exc:
+                return self._app_error(unexpected_error(exc))
+            self._json(200, {"ok": True, "map": found})
+        finally:
+            state.busy.release()
 
     def _evaluate(self, query: str) -> None:
         state = self.server.state

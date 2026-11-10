@@ -146,11 +146,38 @@ class TestWhatThePageOffers:
         assert tags("html")[0]["lang"] == "de" and len(tags("h1")) == 1
         assert "Befundungszahlen auswerten" in PAGE
 
-    def test_the_two_department_checkboxes_both_ticked_to_start_with(self):
+    def test_the_choice_what_to_evaluate_starts_with_everything(self):
+        radios = [attrs for attrs in tags("input") if attrs.get("type") == "radio"]
+        assert [attrs["id"] for attrs in radios] == ["scope-all", "scope-nrad", "scope-allrad"]
+        assert {attrs["name"] for attrs in radios} == {"scope"}                     # one group: exactly one is chosen
+        assert ["checked" in attrs for attrs in radios] == [True, False, False]
+        script = main_script()
+        assert 'scope: "all", auto: true' in script                               # "Alles" and the automatic mode at the start
+        assert 'const SCOPES = { all: ["allrad", "nrad"], nrad: ["nrad"], allrad: ["allrad"] }' in script
+        for scope, label in (("all", "Alles"), ("nrad", "Nur NRAD-Codes"), ("allrad", "Nur Allrad-Codes")):
+            assert f'id="scope-{scope}" value="{scope}"' in PAGE and f">{label}</label>" in PAGE
+
+    def test_the_only_checkbox_is_the_one_of_the_preview(self):
         boxes = {attrs["id"]: attrs for attrs in tags("input") if attrs.get("type") == "checkbox"}
-        assert set(boxes) == {"use-allrad", "use-nrad", "hide-empty"}
-        assert "checked" in boxes["use-allrad"] and "checked" in boxes["use-nrad"]
+        assert set(boxes) == {"hide-empty"}
         assert "checked" not in boxes["hide-empty"]                              # the preview shows every row of the Excel at first
+
+    def test_alles_with_one_map_names_the_other_or_the_choice_that_needs_only_this_one(self):
+        script = main_script()
+        assert 'state.scope === "all" && present.length === 1 ? " – oder " + ONLY[present[0]] + " wählen"' in script
+        assert 'const ONLY = { allrad: "„Nur Allrad-Codes“", nrad: "„Nur NRAD-Codes“" }' in script
+
+    def test_the_automatic_mode_sends_every_map_alone_and_takes_all_or_none(self):
+        script = main_script()
+        assert 'fetch("identify", { method: "POST", body: content })' in script
+        assert '!MAPS.includes(reply.map.department)' in script                    # only a department the page knows
+        assert 'if (found[slot]) {\n          showError(appError("E222", "maps"' in script                    # two of one kind
+        assert script.index("found[slot] = { file, map: reply.map }") < script.index("state.files[slot] = found[slot].file")   # stored only after all were recognised
+        assert script.count("state.files[slot] =") == 2                                 # by hand (setFile) and after all were recognised, nowhere else
+
+    def test_the_switch_between_automatic_and_by_hand_keeps_the_maps(self):
+        assert '$("mode-switch").addEventListener("click", () => { if (state.busy) return; state.auto = !state.auto; clearError(); render(); });' in main_script()
+        assert "Maps selbst zuordnen" in PAGE and "Maps automatisch erkennen" in main_script()
 
     def test_the_preview_is_a_labelled_scrollable_table_that_the_keyboard_can_reach(self):
         region = next(attrs for attrs in tags("div") if attrs.get("id") == "table-wrap")
@@ -166,23 +193,24 @@ class TestWhatThePageOffers:
         assert re.search(r"\.danger\s*\{[^}]*background:\s*var\(--danger\)", css) and "--danger:" in css and ".danger:focus-visible" in css
         assert "danger" not in buttons["quit-no"].get("class", "")                 # 'Abbrechen' stays neutral
 
-    def test_three_file_pickers_that_only_offer_xlsx(self):
-        pickers = [attrs for attrs in tags("input") if attrs.get("type") == "file"]
-        assert {attrs["id"] for attrs in pickers} == {"file-statistics", "file-allrad", "file-nrad"}
-        assert all(attrs.get("accept") == ".xlsx" for attrs in pickers)
-        assert not any("multiple" in attrs for attrs in pickers)
+    def test_four_file_pickers_that_only_offer_xlsx_and_only_the_automatic_one_takes_several(self):
+        pickers = {attrs["id"]: attrs for attrs in tags("input") if attrs.get("type") == "file"}
+        assert set(pickers) == {"file-statistics", "file-maps", "file-allrad", "file-nrad"}
+        assert all(attrs.get("accept") == ".xlsx" for attrs in pickers.values())
+        assert [name for name, attrs in pickers.items() if "multiple" in attrs] == ["file-maps"]
 
     def test_all_the_buttons_exist_and_none_submits_by_accident(self):
         buttons = {attrs["id"]: attrs for attrs in tags("button")}
-        assert set(buttons) == {"submit", "download", "again", "quit", "quit-yes", "quit-no", "idle-off", "idle-on", "idle-yes", "idle-no"}
+        assert set(buttons) == {"submit", "download", "again", "quit", "quit-yes", "quit-no", "idle-off", "idle-on", "idle-yes", "idle-no", "mode-switch"}
         assert all(attrs.get("type") in ("submit", "button") for attrs in buttons.values())
         assert [i for i, attrs in buttons.items() if attrs["type"] == "submit"] == ["submit"]
         assert "disabled" in buttons["submit"]                                  # nothing to evaluate before files are chosen
 
     def test_the_texts_the_plan_names(self):
-        for text in ("Auswerten", "Excel herunterladen", "Weitere Statistik hochladen", "Server beenden", "Welche Bereiche?",
+        for text in ("Auswerten", "Excel herunterladen", "Weitere Statistik hochladen", "Server beenden", "Was auswerten?",
                      "Mitarbeiterstatistik", "Leistungsmaps", "Allrad-Map", "NRAD-Map", "Datei wählen oder hierher ziehen",
-                     "Wird ausgewertet …", "Es fehlt noch: ", "Bitte mindestens einen Bereich ankreuzen.", "Technische Details",
+                     "Map-Dateien wählen oder hierher ziehen", "sie werden automatisch erkannt", "Map wird erkannt …",
+                     "Wird ausgewertet …", "Es fehlt noch: ", "Technische Details",
                      "Fehlercode", "Auswertung fertig", "Das Programm wurde beendet."):
             assert text in PAGE, text
 
@@ -263,9 +291,11 @@ class TestPageAndServerAgree:
         script = main_script()
         used = set(re.findall(r'\$\("([\w-]+)"\)', script)) | set(re.findall(r'getElementById\("([\w-]+)"\)', script))
         assert used and used <= ids, used - ids
-        for prefix in ("field-", "file-", "drop-", "text-", "sub-", "use-"):
-            for slot in (SLOT_LABELS if prefix not in ("use-",) else ("allrad", "nrad")):
+        for prefix in ("field-", "file-", "drop-", "text-", "sub-"):
+            for slot in SLOT_LABELS:
                 assert prefix + slot in ids, prefix + slot
+        for scope in ("all", "nrad", "allrad"):
+            assert "scope-" + scope in ids
 
     def test_every_element_with_a_data_hook_in_the_script_exists_in_the_page(self):
         script = main_script()
@@ -419,7 +449,7 @@ class TestStoppingByItself:
     def test_the_fields_of_the_replies_the_page_reads_exist(self):
         from local_app.errors import AppError
         read = set(re.findall(r"\breply\.(\w+)", main_script()))
-        reply = {"ok", "error", "enabled", "limit", "remaining", "summary"}
+        reply = {"ok", "error", "enabled", "limit", "remaining", "summary", "map"}
         assert read <= reply, read - reply
         payload = set(evaluate_status_payload())
         assert {"enabled", "limit", "remaining"} <= payload and {"enabled", "limit", "remaining", "ok"} == payload
