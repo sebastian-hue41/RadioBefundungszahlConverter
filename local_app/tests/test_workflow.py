@@ -142,12 +142,18 @@ class TestWhatItBuilds:
     def test_the_steps_in_their_order(self):
         names = [step["name"] for step in steps()]
         assert names == ["Check out the branch", "Set up Python", "Install the pinned build requirements and pytest", "Run all tests",
-                         "Build the program", "Smoke test the finished program", "Package the program", "Keep the program as a build artifact"]
+                         "Show which tests failed", "Build the program", "Smoke test the finished program", "Package the program", "Keep the program as a build artifact"]
 
     def test_all_tests_run_and_a_failure_stops_the_job(self):
         run = next(step for step in steps() if step["name"] == "Run all tests")["run"].strip()
-        assert run == "python -m pytest -q -p no:cacheprovider $DESELECT"          # the whole suite: tests/ and local_app/tests/
+        assert run == 'python -m pytest -q -p no:cacheprovider --junitxml="$RUNNER_TEMP/junit.xml" $DESELECT'      # the whole suite: tests/ and local_app/tests/
         assert "continue-on-error" not in TEXT
+
+    def test_a_failed_test_is_named_on_the_page_of_the_run(self):
+        step = next(step for step in steps() if step["name"] == "Show which tests failed")
+        assert step["if"] == "${{ failure() }}"
+        assert step["run"].strip() == 'python local_app/tests/ci_annotations.py "$RUNNER_TEMP/junit.xml"'
+        assert (ROOT / "local_app" / "tests" / "ci_annotations.py").is_file()
 
     def test_the_build_is_the_one_verified_on_a_developer_machine(self):
         run = " ".join(next(step for step in steps() if step["name"] == "Build the program")["run"].split())

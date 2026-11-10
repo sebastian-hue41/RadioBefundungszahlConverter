@@ -75,7 +75,12 @@ jobs:
           python -m pip list
 
       - name: Run all tests
-        run: python -m pytest -q -p no:cacheprovider $DESELECT
+        run: python -m pytest -q -p no:cacheprovider --junitxml="$RUNNER_TEMP/junit.xml" $DESELECT
+
+      # The log of a run needs a login; this puts the names of failed tests on the page of the run.
+      - name: Show which tests failed
+        if: ${{ failure() }}
+        run: python local_app/tests/ci_annotations.py "$RUNNER_TEMP/junit.xml"
 
       - name: Build the program
         run: >
