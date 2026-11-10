@@ -182,10 +182,11 @@
       <fieldset class="step" id="step-scope">
         <legend><span class="num" aria-hidden="true">2</span>Was auswerten?</legend>
         <div class="choices">
-          <label for="scope-all"><input type="radio" name="scope" id="scope-all" value="all" checked>Alles</label>
+          <label for="scope-auto"><input type="radio" name="scope" id="scope-auto" value="auto" checked aria-describedby="scope-note">Auto</label>
           <label for="scope-nrad"><input type="radio" name="scope" id="scope-nrad" value="nrad">Nur NRAD-Codes</label>
           <label for="scope-allrad"><input type="radio" name="scope" id="scope-allrad" value="allrad">Nur Allrad-Codes</label>
         </div>
+        <p class="muted small-print" id="scope-note" aria-live="polite"></p>
       </fieldset>
 
       <div class="step" id="step-maps">
@@ -260,7 +261,7 @@
     <div>
       <button type="button" id="quit" class="danger">Server beenden</button>
       <div class="confirm" id="confirm" role="alert" hidden>
-        <span>Das Ergebnis wurde noch nicht heruntergeladen. Trotzdem beenden?</span>
+        <span id="confirm-text">Programm wirklich beenden?</span>
         <button type="button" id="quit-yes" class="small danger">Ja, beenden</button>
         <button type="button" id="quit-no" class="small">Abbrechen</button>
       </div>
@@ -288,16 +289,19 @@
   const $ = (id) => document.getElementById(id);
   const MAPS = ["allrad", "nrad"];
   const FIELDS = ["statistics", ...MAPS, "maps"];
-  // What each choice of "Was auswerten?" evaluates, and so which maps it needs.
-  const SCOPES = { all: ["allrad", "nrad"], nrad: ["nrad"], allrad: ["allrad"] };
+  // What each choice of "Was auswerten?" evaluates, and so which maps it needs. "Auto" evaluates the departments
+  // whose map was chosen: both maps, everything; one map, only its codes (the program names what it left out, W401).
+  const SCOPES = { auto: null, nrad: ["nrad"], allrad: ["allrad"] };
   const ONLY = { allrad: "„Nur Allrad-Codes“", nrad: "„Nur NRAD-Codes“" };
+  const DEPT = { allrad: "Allrad", nrad: "NRAD" };
   const state = {
     files: { statistics: null, allrad: null, nrad: null },
     found: { allrad: null, nrad: null },     // what the program recognised in a map (automatic mode)
-    scope: "all", auto: true,                // "Alles" and the automatic mode are the start
+    scope: "auto", auto: true,               // "Auto" and the automatic mode are the start
     busy: false, identifying: false, closed: false, hasResult: false, downloaded: false, summary: null,
   };
-  const needed = () => SCOPES[state.scope];
+  const present = () => MAPS.filter((slot) => state.files[slot]);
+  const needed = () => SCOPES[state.scope] || present();
 
   // ── Wording: everything comes from the catalog the server put into the page ──
   const number = new Intl.NumberFormat("de-DE");
@@ -324,6 +328,7 @@
     if (error.slot === "maps" || error.code === "E222") return ["maps"];
     if (error.slot) return MAPS.includes(error.slot) && state.auto ? ["maps"] : [error.slot];
     if (error.code === "E221") return state.auto ? ["maps"] : MAPS;
+    if (error.code === "E303" && state.scope === "auto") return state.auto ? ["maps"] : MAPS.filter((slot) => !state.files[slot]);   // the other map is missing
     return [];
   }
 
@@ -354,7 +359,7 @@
       $("file-" + slot).setAttribute("aria-invalid", "true");
       $("file-" + slot).setAttribute("aria-describedby", "error");
     }
-    if (error.code === "E301" || error.code === "E303") $("step-scope").classList.add("invalid");
+    if (error.code === "E301" || (error.code === "E303" && state.scope !== "auto")) $("step-scope").classList.add("invalid");
     $("error").dataset.slot = targets.join(" ");
     $("error").hidden = false;
     $("error").focus();
@@ -365,18 +370,28 @@
   function missing() {
     const list = [];
     if (!state.files.statistics) list.push(catalog.slots.statistics);
+    if (!needed().length) list.push(catalog.slots.maps);                // "Auto" without any map
     for (const slot of needed()) if (!state.files[slot]) list.push(catalog.slots[slot]);
     return list;
   }
 
-  // "Alles" with one of the two maps: name the other one, or the choice that needs only the one there is.
   function statusText(lacking) {
     if (state.identifying) return "Map wird erkannt …";
     if (state.busy) return "Bitte kurz warten …";
     if (!lacking.length) return "Bereit zum Auswerten.";
-    const present = MAPS.filter((slot) => state.files[slot]);
-    const alternative = state.scope === "all" && present.length === 1 ? " – oder " + ONLY[present[0]] + " wählen" : "";
-    return "Es fehlt noch: " + lacking.join(", ") + alternative;
+    return "Es fehlt noch: " + lacking.join(", ");
+  }
+
+  // Under the choice: what "Auto" will evaluate with the maps chosen so far.
+  function scopeNote() {
+    if (state.scope !== "auto") return "";
+    const maps = present();
+    if (maps.length === 2) return "Auto: alle Codes – Allrad mit der Allrad-Map, NRAD mit der NRAD-Map.";
+    if (maps.length === 1) {
+      const other = maps[0] === "allrad" ? "nrad" : "allrad";
+      return "Auto: nur " + DEPT[maps[0]] + "-Codes. Für die " + DEPT[other] + "-Codes die " + catalog.slots[other] + " hinzufügen.";
+    }
+    return "Auto: ausgewertet werden die Bereiche, deren Map gewählt ist.";
   }
 
   function renderFile(slot) {
@@ -411,15 +426,17 @@
     for (const slot of ["statistics", ...MAPS]) renderFile(slot);
     renderMapList();
     $("field-maps").hidden = !state.auto;
-    for (const slot of MAPS) $("field-" + slot).hidden = state.auto || !needed().includes(slot);
+    for (const slot of MAPS) $("field-" + slot).hidden = state.auto || (state.scope !== "auto" && !needed().includes(slot));
     $("mode-switch").textContent = state.auto ? "Maps selbst zuordnen" : "Maps automatisch erkennen";
     $("scope-" + state.scope).checked = true;
+    $("scope-note").textContent = scopeNote();
+    $("scope-note").hidden = !$("scope-note").textContent;
 
     const lacking = missing();
     $("status").textContent = statusText(lacking);
     $("submit").disabled = state.busy || lacking.length > 0;
     $("submit").textContent = state.busy && !state.identifying ? "Wird ausgewertet …" : "Auswerten";
-    for (const id of ["file-statistics", "file-allrad", "file-nrad", "file-maps", "scope-all", "scope-nrad", "scope-allrad", "mode-switch"]) $(id).disabled = state.busy;
+    for (const id of ["file-statistics", "file-allrad", "file-nrad", "file-maps", "scope-auto", "scope-nrad", "scope-allrad", "mode-switch"]) $(id).disabled = state.busy;
     $("form").setAttribute("aria-busy", String(state.busy));
   }
 
@@ -548,7 +565,8 @@
   }
 
   function selectionProblem(slots) {
-    if (!SCOPES[state.scope]) return appError("E301");
+    if (!(state.scope in SCOPES)) return appError("E301");
+    if (slots.length < 2) return appError("E302", state.auto ? "maps" : "allrad");    // "Auto" without any map
     for (const slot of slots) {
       if (!state.files[slot]) return appError("E302", slot);
     }
@@ -771,15 +789,15 @@
     show("view-closed");
   }
 
+  // Stopping takes two clicks: the first only asks (and says if the result has not been downloaded yet), the second stops.
   $("quit").addEventListener("click", () => {
-    if (state.hasResult && !state.downloaded) {
-      $("idle-confirm").hidden = true;
-      renderIdle();
-      $("confirm").hidden = false;
-      $("quit-no").focus();
-    } else {
-      quit();
-    }
+    $("idle-confirm").hidden = true;
+    renderIdle();
+    $("confirm-text").textContent = state.hasResult && !state.downloaded
+      ? "Das Ergebnis wurde noch nicht heruntergeladen. Trotzdem beenden?"
+      : "Programm wirklich beenden?";
+    $("confirm").hidden = false;
+    $("quit-no").focus();
   });
   $("quit-yes").addEventListener("click", quit);
   $("quit-no").addEventListener("click", () => {

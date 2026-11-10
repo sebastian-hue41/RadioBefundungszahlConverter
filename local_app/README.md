@@ -25,13 +25,13 @@ python -m local_app.main
 ## 2. Use it
 
 1. **Mitarbeiterstatistik**: choose the statistics file, or drag it onto the box.
-2. **Was auswerten?**: **Alles** (chosen at the start), **Nur NRAD-Codes** or **Nur Allrad-Codes**.
-3. **Leistungsmaps**: choose or drop your map files, both at once if you like (see below). The program recognises
-   which is the Allrad map and which the NRAD map and lists them. **Alles** needs both. To put each map into a field
-   of its own instead: **Maps selbst zuordnen**.
+2. **Was auswerten?**: **Auto** (chosen at the start), **Nur NRAD-Codes** or **Nur Allrad-Codes**.
+3. **Leistungsmaps**: choose or drop your map files, one or both at once (see below); they are recognised and listed.
+   **Auto** evaluates the departments whose map you chose, as the line under the choice says.
+   One field per map instead: **Maps selbst zuordnen**.
 4. **Auswerten**, look at the **Vorschau** (the table of the Excel, before you download it), then **Excel herunterladen**.
 5. Next person: **Weitere Statistik hochladen** (the maps stay chosen until you reload the page).
-6. When you are done: **Server beenden**.
+6. When you are done: **Server beenden**, then **Ja, beenden**.
 
 The line next to **Auswerten** always says what is still missing. A red box says what went wrong and what to do.
 
@@ -41,7 +41,8 @@ starts the 30 minutes again. To keep it running, use **Automatisches Beenden aus
 
 | You choose | Counted | Map used |
 |---|---|---|
-| Alles | everything | Allrad map, and the NRAD map for the `N` codes |
+| Auto, both maps chosen | everything | Allrad map, and the NRAD map for the `N` codes |
+| Auto, one map chosen | the codes of that map's department (the hints say how many were left out) | that map |
 | Nur NRAD-Codes | codes that start with `N` | NRAD map |
 | Nur Allrad-Codes | codes that do **not** start with `N` | Allrad map |
 
@@ -59,10 +60,9 @@ starts the 30 minutes again. To keep it running, use **Automatisches Beenden aus
   A code may count in several sections. Anything else (`1.5`, `-1`, `x`) is refused (E214), and so is a section name
   used for two columns (E213).
 - A code listed twice is merged (the higher value wins) and noted in the Excel. A code missing from the map gets its own row.
-- **Two maps**: the Allrad map holds the Allrad codes, the NRAD map the `N` codes. A map whose codes start with `N` at
-  least half of the time is an NRAD map; that is how they are told apart. Two of one kind are refused (E222); with
-  **Maps selbst zuordnen** a map in the wrong field is refused (E220). To use both together they need the same
-  sections (E221 otherwise).
+- **Two maps**: the Allrad map holds the Allrad codes, the NRAD map the `N` codes. A map is an NRAD map when at least
+  half of its codes start with `N`. Two of one kind are refused (E222), a map in the wrong field too (E220). Used
+  together, they need the same sections (E221 otherwise).
 
 *Statistics file* (`.xlsx` from the RIS, up to 50 MB and 500,000 rows): labelled `Mitarbeiter` and `Befunddatum`, a header
 row with `IND1`, `IND2`, `DokDatum`, `Leistung` and `Leist-Kurz` (row 10 in the RIS export) and one row per Leistung below it.

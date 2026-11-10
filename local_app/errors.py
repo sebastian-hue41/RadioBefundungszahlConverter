@@ -128,11 +128,11 @@ _add("E222", "Es wurden zwei Maps derselben Art gewählt.",
 
 # Request and selection.
 _add("E301", "Kein Bereich ausgewählt.",
-     "Bitte „Alles“, „Nur NRAD-Codes“ oder „Nur Allrad-Codes“ wählen.")
+     "Bitte „Auto“, „Nur NRAD-Codes“ oder „Nur Allrad-Codes“ wählen.")
 _add("E302", "Es fehlt eine Datei.",
      "Bitte die markierte Datei wählen.")
 _add("E303", "Diese Statistik enthält keine {dept}.",
-     "Bitte bei „Was auswerten?“ eine andere Auswahl treffen, zum Beispiel „Alles“.")
+     "Bitte die Map des anderen Bereichs hinzufügen oder bei „Was auswerten?“ eine andere Auswahl treffen.")
 _add("E304", "Die Übertragung war unvollständig.",
      "Bitte noch einmal versuchen.")
 _add("E305", "Die Dateien sind zusammen zu groß.",

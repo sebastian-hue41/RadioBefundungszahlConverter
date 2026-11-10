@@ -37,9 +37,9 @@ This file is generated from `local_app/errors.py`; a test fails if the two diffe
 | E220 | Allrad- und NRAD-Map sind vertauscht. | Bitte die beiden Dateien tauschen. |
 | E221 | Allrad- und NRAD-Map passen nicht zusammen. | Bitte zusammengehörige Versionen wählen. |
 | E222 | Es wurden zwei Maps derselben Art gewählt. | Bitte je eine Allrad-Map und eine NRAD-Map wählen. |
-| E301 | Kein Bereich ausgewählt. | Bitte „Alles“, „Nur NRAD-Codes“ oder „Nur Allrad-Codes“ wählen. |
+| E301 | Kein Bereich ausgewählt. | Bitte „Auto“, „Nur NRAD-Codes“ oder „Nur Allrad-Codes“ wählen. |
 | E302 | Es fehlt eine Datei. | Bitte die markierte Datei wählen. |
-| E303 | Diese Statistik enthält keine {dept}. | Bitte bei „Was auswerten?“ eine andere Auswahl treffen, zum Beispiel „Alles“. |
+| E303 | Diese Statistik enthält keine {dept}. | Bitte die Map des anderen Bereichs hinzufügen oder bei „Was auswerten?“ eine andere Auswahl treffen. |
 | E304 | Die Übertragung war unvollständig. | Bitte noch einmal versuchen. |
 | E305 | Die Dateien sind zusammen zu groß. | Bitte die richtigen Dateien wählen. |
 | E306 | Die Datei konnte im Browser nicht gelesen werden. | Sie liegt eventuell nur in der Cloud oder wurde inzwischen geändert. Bitte lokal speichern und neu wählen. |

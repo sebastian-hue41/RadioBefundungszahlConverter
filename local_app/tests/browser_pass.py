@@ -142,21 +142,25 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
     try:
         # 1. the complete run in the automatic mode: statistics, maps (recognised), Auswerten, download
         page = new_page(b, app, viewport={"width": 900, "height": 1000})
-        check("first screen: button disabled, status names what is missing", page.locator("#submit").is_disabled() and page.inner_text("#status") == "Es fehlt noch: Mitarbeiterstatistik, Allrad-Map, NRAD-Map")
-        check("first screen: 'Alles' is chosen and the maps go into one field, recognised automatically",
-              page.is_checked("#scope-all") and visible(page, "#field-maps") and not visible(page, "#field-allrad") and not visible(page, "#field-nrad")
+        check("first screen: button disabled, status names what is missing", page.locator("#submit").is_disabled() and page.inner_text("#status") == "Es fehlt noch: Mitarbeiterstatistik, Leistungsmap", page.inner_text("#status"))
+        check("first screen: 'Auto' is chosen and says what it does, the maps go into one field, recognised automatically",
+              page.is_checked("#scope-auto") and page.inner_text("#scope-note") == "Auto: ausgewertet werden die Bereiche, deren Map gewählt ist."
+              and visible(page, "#field-maps") and not visible(page, "#field-allrad") and not visible(page, "#field-nrad")
               and page.inner_text("#mode-switch") == "Maps selbst zuordnen" and "automatisch erkannt" in page.inner_text("#sub-maps"))
-        pick(page, s=stats); check("after the statistics: status names the two maps", page.inner_text("#status") == "Es fehlt noch: Allrad-Map, NRAD-Map" and page.locator("#drop-statistics").evaluate("e => e.classList.contains('has-file')"))
+        pick(page, s=stats); check("after the statistics: status names the map", page.inner_text("#status") == "Es fehlt noch: Leistungsmap" and page.locator("#drop-statistics").evaluate("e => e.classList.contains('has-file')"))
         check("the chosen file shows its name with a check mark and its size", page.inner_text("#text-statistics") == "✓ statistik.xlsx" and "KB" in page.inner_text("#sub-statistics"))
         check("the picker is cleared so the same file can be chosen again", page.input_value("#file-statistics") == "")
         pick(page, maps=[nrad])
         check("one map: it is recognised and listed with its kind and number of codes", map_lines(page) == ["✓ map_nrad.xlsx – NRAD-Map · 2 Codes"], str(map_lines(page)))
-        check("'Alles' with only the NRAD map: the line names the Allrad map or the choice that needs only this one",
-              page.inner_text("#status") == "Es fehlt noch: Allrad-Map – oder „Nur NRAD-Codes“ wählen" and page.locator("#submit").is_disabled(), page.inner_text("#status"))
-        choose(page, "nrad"); check("... choosing 'Nur NRAD-Codes' makes it ready", page.inner_text("#status") == "Bereit zum Auswerten." and page.locator("#submit").is_enabled())
-        choose(page, "all"); pick(page, maps=[allrad])
+        check("'Auto' with only the NRAD map: ready, and the line under the choice says only the NRAD codes are evaluated",
+              page.inner_text("#status") == "Bereit zum Auswerten." and page.locator("#submit").is_enabled()
+              and page.inner_text("#scope-note") == "Auto: nur NRAD-Codes. Für die Allrad-Codes die Allrad-Map hinzufügen.", page.inner_text("#scope-note"))
+        choose(page, "allrad"); check("... 'Nur Allrad-Codes' needs the Allrad map, and the line under the choice is gone",
+                                      page.inner_text("#status") == "Es fehlt noch: Allrad-Map" and page.locator("#submit").is_disabled() and not visible(page, "#scope-note"))
+        choose(page, "auto"); pick(page, maps=[allrad])
         check("the second map is added, both are listed (Allrad first)", map_lines(page) == ["✓ map_allrad.xlsx – Allrad-Map · 3 Codes", "✓ map_nrad.xlsx – NRAD-Map · 2 Codes"], str(map_lines(page)))
-        check("all there: status says ready, button enabled", page.inner_text("#status") == "Bereit zum Auswerten." and page.locator("#submit").is_enabled())
+        check("all there: status says ready, button enabled, 'Auto' evaluates all codes",
+              page.inner_text("#status") == "Bereit zum Auswerten." and page.locator("#submit").is_enabled() and page.inner_text("#scope-note").startswith("Auto: alle Codes"))
         check("the picker of the maps is cleared too", page.input_value("#file-maps") == "")
         shot(page, f"{S}/shot_ready.png")
         page.click("#submit"); page.wait_for_selector("#view-result:not([hidden])", timeout=20000)
@@ -220,12 +224,12 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         check("preview: markup in a section name is shown as plain text and nothing runs", any("<img src=x" in n for n in names) and pg.locator("#preview img").count() == 0 and pg.evaluate("window.__pwned") is None and csp(pg) == [], str(names[:3])); pg.context.close()
         # 2. Weitere Statistik
         page.click("#again"); check("'Weitere Statistik' returns to the form", visible(page, "#view-form") and not visible(page, "#view-result"))
-        check("... clears only the statistics file, the recognised maps stay", page.inner_text("#text-statistics").startswith("Datei wählen") and len(map_lines(page)) == 2 and page.is_checked("#scope-all"))
+        check("... clears only the statistics file, the recognised maps stay", page.inner_text("#text-statistics").startswith("Datei wählen") and len(map_lines(page)) == 2 and page.is_checked("#scope-auto"))
         check("... and the server forgot the result", page.evaluate("fetch('download').then(r => r.status)") == 404)
         # 3. the three choices and their download names
         for label, scope, suffix, expect, unused in (("Nur Allrad-Codes", "allrad", "_Allrad.xlsx", {"MRT": 2, "CT": 1}, "map_nrad.xlsx"),
                                                      ("Nur NRAD-Codes", "nrad", "_NRAD.xlsx", {"MRT": 2, "CT": 3}, "map_allrad.xlsx"),
-                                                     ("Alles", "all", "_Allrad_NRAD.xlsx", {"MRT": 4, "CT": 4}, None)):
+                                                     ("Auto", "auto", "_Allrad_NRAD.xlsx", {"MRT": 4, "CT": 4}, None)):
             pg = new_page(b, app); pick(pg, stats, [allrad, nrad]); choose(pg, scope)
             lines = map_lines(pg)
             check(f"choice {label}: the map it does not use is marked so in the list", all(("nicht verwendet" in line) == (unused is not None and unused in line) for line in lines), str(lines))
@@ -251,9 +255,19 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         pick(pg, maps=[broken]); check("auto: a file that is no Excel file: E201 for the maps", pg.inner_text("#error-code") == "E201" and pg.inner_text("#error-title").startswith("„kaputt.xlsx“"))
         pg.context.close()
         pg = new_page(b, app); pick(pg, stats, [allrad])
-        check("auto: 'Alles' with only the Allrad map names the NRAD map or 'Nur Allrad-Codes'", pg.inner_text("#status") == "Es fehlt noch: NRAD-Map – oder „Nur Allrad-Codes“ wählen" and pg.locator("#submit").is_disabled(), pg.inner_text("#status"))
-        choose(pg, "allrad"); check("... 'Nur Allrad-Codes' makes it ready", pg.inner_text("#status") == "Bereit zum Auswerten.")
-        choose(pg, "nrad"); check("... 'Nur NRAD-Codes' needs the NRAD map and says only that", pg.inner_text("#status") == "Es fehlt noch: NRAD-Map" and "nicht verwendet" in map_lines(pg)[0])
+        check("'Auto' with only the Allrad map: ready, the line says only the Allrad codes", pg.inner_text("#status") == "Bereit zum Auswerten." and pg.inner_text("#scope-note") == "Auto: nur Allrad-Codes. Für die NRAD-Codes die NRAD-Map hinzufügen.", pg.inner_text("#scope-note"))
+        choose(pg, "nrad"); check("... 'Nur NRAD-Codes' needs the NRAD map and marks the Allrad map as not used", pg.inner_text("#status") == "Es fehlt noch: NRAD-Map" and "nicht verwendet" in map_lines(pg)[0])
+        choose(pg, "auto"); pg.click("#submit"); pg.wait_for_selector("#view-result:not([hidden])")
+        check("... 'Auto' evaluates the Allrad codes only and the hints say how many others were left out",
+              pg.inner_text("#result-what") == "3 Leistungen · Allrad" and "4 Leistungen der anderen Abteilung wurden nicht ausgewertet." in pg.text_content("#hints-list"), pg.text_content("#hints-list"))
+        nm = download(pg, f"{F}/out_auto_allrad.xlsx"); check("... and the file is named after what was evaluated", nm.endswith("_Allrad.xlsx"), nm)
+        pg.context.close()
+        pg = new_page(b, app); run_eval(pg, s=only_n, maps=[allrad])
+        check("'Auto' with a statistics without Allrad codes and only the Allrad map: E303 marks the maps field, not the choice",
+              pg.inner_text("#error-code") == "E303" and pg.evaluate("[...document.querySelectorAll('.field.invalid')].map(e => e.dataset.slot)") == ["maps"]
+              and not pg.evaluate("document.getElementById('step-scope').classList.contains('invalid')") and "Map des anderen Bereichs" in pg.inner_text("#error-hint"))
+        pick(pg, maps=[nrad]); check("... adding the NRAD map clears it and evaluates", not visible(pg, "#error") and pg.inner_text("#status") == "Bereit zum Auswerten.")
+        pg.click("#submit"); pg.wait_for_selector("#view-result:not([hidden])"); check("... with all its codes", pg.inner_text("#result-what") == "2 Leistungen · Allrad + NRAD", pg.inner_text("#result-what"))
         pg.context.close()
         pg = new_page(b, app); pg.evaluate("window.__slowIdentify = 1500"); pick(pg, s=stats); pg.set_input_files("#file-maps", [allrad])
         check("auto: while a map is recognised the line says so, nothing can be sent and the form is locked",
@@ -269,7 +283,8 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         check("by hand: 'Maps selbst zuordnen' shows a field per map, with the recognised maps in them",
               visible(pg, "#field-allrad") and visible(pg, "#field-nrad") and not visible(pg, "#field-maps") and pg.inner_text("#text-allrad") == "✓ map_allrad.xlsx" and pg.inner_text("#text-nrad") == "✓ map_nrad.xlsx" and pg.inner_text("#mode-switch") == "Maps automatisch erkennen")
         choose(pg, "nrad"); check("by hand: 'Nur NRAD-Codes' shows only the NRAD field", not visible(pg, "#field-allrad") and visible(pg, "#field-nrad") and pg.inner_text("#status") == "Bereit zum Auswerten.")
-        choose(pg, "all"); pg.click("#mode-switch"); check("back to automatic: the maps are listed again", len(map_lines(pg)) == 2 and visible(pg, "#field-maps"))
+        choose(pg, "auto"); check("by hand: 'Auto' shows both fields (either may be filled)", visible(pg, "#field-allrad") and visible(pg, "#field-nrad"))
+        pg.click("#mode-switch"); check("back to automatic: the maps are listed again", len(map_lines(pg)) == 2 and visible(pg, "#field-maps"))
         pg.context.close()
         # 6. drag and drop
         def drop(page, sel, files, bubbles=True):
@@ -291,7 +306,7 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         pg = new_page(b, app); pg.evaluate("window.__slow = 1500"); pick(pg, stats, [allrad, nrad]); pg.click("#submit")
         until(pg, "document.getElementById('submit').textContent.includes('Wird ausgewertet')", 3)
         check("while working: button says 'Wird ausgewertet …' and is disabled", pg.inner_text("#submit") == "Wird ausgewertet …" and pg.locator("#submit").is_disabled())
-        check("... the form is locked", all(pg.locator(s).is_disabled() for s in ("#file-statistics", "#file-maps", "#file-allrad", "#file-nrad", "#scope-all", "#scope-nrad", "#scope-allrad", "#mode-switch")))
+        check("... the form is locked", all(pg.locator(s).is_disabled() for s in ("#file-statistics", "#file-maps", "#file-allrad", "#file-nrad", "#scope-auto", "#scope-nrad", "#scope-allrad", "#mode-switch")))
         check("... 'Server beenden' stays usable", pg.locator("#quit").is_enabled() and visible(pg, "#quit"))
         pg.locator("#submit").click(force=True); pg.keyboard.press("Enter")
         pg.wait_for_selector("#view-result:not([hidden])", timeout=20000)
@@ -317,7 +332,7 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         pg = error_case("by hand: maps with different sections", "E221", ["allrad", "nrad"], by_hand=dict(s=stats, a=allrad, n=other_sections)); pg.context.close()
         pg = new_page(b, app); run_eval(pg, s=only_n, scope="allrad")
         check("error: a choice with no matching rows (E303) marks 'Was auswerten?' and keeps the entries", pg.inner_text("#error-code") == "E303" and pg.evaluate("document.getElementById('step-scope').classList.contains('invalid')") and "Allrad-Leistungen" in pg.inner_text("#error-title") and pg.inner_text("#text-statistics").startswith("✓"))
-        choose(pg, "all"); check("... another choice clears the mark", not pg.evaluate("document.getElementById('step-scope').classList.contains('invalid')") and not visible(pg, "#error")); pg.context.close()
+        choose(pg, "auto"); check("... another choice clears the mark", not pg.evaluate("document.getElementById('step-scope').classList.contains('invalid')") and not visible(pg, "#error")); pg.context.close()
         pg = new_page(b, app); run_eval(pg, s=broken); pick(pg, s=stats)
         check("an error goes away when the file it names is replaced, the rest stays", not visible(pg, "#error") and len(map_lines(pg)) == 2)
         pg.click("#submit"); pg.wait_for_selector("#view-result:not([hidden])"); check("... and the corrected run works", "Auswertung fertig" in pg.inner_text("#result-title")); pg.context.close()
@@ -340,11 +355,14 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         check("browser console shows no errors or warnings, no CSP violation", not [m for m in pg.msgs if m[0] in ("error", "warning", "pageerror")] and csp(pg) == [], str(pg.msgs)); pg.context.close()
         # 12. quitting
         pg = new_page(b, app); run_eval(pg)
-        pg.click("#quit"); check("'Server beenden' asks first when the result was not downloaded", visible(pg, "#confirm") and pg.locator("#quit-no").evaluate("e => document.activeElement === e"))
+        pg.click("#quit"); check("'Server beenden' asks first and says the result was not downloaded", visible(pg, "#confirm") and "noch nicht heruntergeladen" in pg.inner_text("#confirm-text") and pg.locator("#quit-no").evaluate("e => document.activeElement === e"))
         pg.click("#quit-no"); check("'Abbrechen' keeps everything", not visible(pg, "#confirm") and visible(pg, "#view-result") and app.proc.poll() is None)
-        download(pg, f"{F}/y.xlsx"); pg.click("#quit")
-        pg.wait_for_selector("#view-closed:not([hidden])", timeout=5000)
-        check("after the download it asks nothing: message shown, form gone", "beendet" in pg.inner_text("#view-closed") and not visible(pg, "#view-form") and not visible(pg, "#footer"))
+        download(pg, f"{F}/y.xlsx"); pg.click("#quit"); time.sleep(0.5)
+        check("after the download it still asks once more (two clicks), and nothing stopped yet",
+              visible(pg, "#confirm") and pg.inner_text("#confirm-text") == "Programm wirklich beenden?" and app.proc.poll() is None and not visible(pg, "#view-closed")
+              and pg.evaluate("window.__requests.filter(u => u.startsWith('shutdown')).length") == 0)
+        pg.click("#quit-yes"); pg.wait_for_selector("#view-closed:not([hidden])", timeout=5000)
+        check("the second click ends it: message shown, form gone", "beendet" in pg.inner_text("#view-closed") and not visible(pg, "#view-form") and not visible(pg, "#footer"))
         t0 = time.time()
         while app.proc.poll() is None and time.time() - t0 < 10: time.sleep(0.1)
         check("... and the process is gone with exit code 0", app.proc.poll() == 0, str(app.proc.poll())); pg.context.close()
@@ -388,11 +406,11 @@ with sync_playwright() as p, browser(p, ENGINE) as b:
         pg = new_page(b, app); order = []
         for _ in range(8):
             pg.keyboard.press("Tab"); order.append(pg.evaluate("document.activeElement.id"))
-        check("tab order follows the page: statistics, the choice (one stop), the maps, the switch, then 'Server beenden'", order[:4] == ["file-statistics", "scope-all", "file-maps", "mode-switch"] and "quit" in order, str(order))
+        check("tab order follows the page: statistics, the choice (one stop), the maps, the switch, then 'Server beenden'", order[:4] == ["file-statistics", "scope-auto", "file-maps", "mode-switch"] and "quit" in order, str(order))
         pg.focus("#file-maps"); check("the focused drop area shows a visible focus ring", pg.evaluate("getComputedStyle(document.getElementById('drop-maps')).outlineStyle") != "none")
-        pg.focus("#scope-all"); pg.keyboard.press("ArrowDown")
+        pg.focus("#scope-auto"); pg.keyboard.press("ArrowDown")
         check("the arrow keys move through the choice", pg.is_checked("#scope-nrad") and pg.evaluate("document.activeElement.id") == "scope-nrad")
-        pg.keyboard.press("ArrowUp"); check("... and back to 'Alles'", pg.is_checked("#scope-all"))
+        pg.keyboard.press("ArrowUp"); check("... and back to 'Auto'", pg.is_checked("#scope-auto"))
         pick(pg, stats, [allrad, nrad]); pg.focus("#mode-switch"); pg.keyboard.press("Tab")
         check("with everything chosen the next tab stop after the switch is 'Auswerten'", pg.evaluate("document.activeElement.id") == "submit", pg.evaluate("document.activeElement.id"))
         pg.keyboard.press("Enter"); pg.wait_for_selector("#view-result:not([hidden])")

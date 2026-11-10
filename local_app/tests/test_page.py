@@ -146,26 +146,41 @@ class TestWhatThePageOffers:
         assert tags("html")[0]["lang"] == "de" and len(tags("h1")) == 1
         assert "Befundungszahlen auswerten" in PAGE
 
-    def test_the_choice_what_to_evaluate_starts_with_everything(self):
+    def test_the_choice_what_to_evaluate_starts_with_auto(self):
         radios = [attrs for attrs in tags("input") if attrs.get("type") == "radio"]
-        assert [attrs["id"] for attrs in radios] == ["scope-all", "scope-nrad", "scope-allrad"]
+        assert [attrs["id"] for attrs in radios] == ["scope-auto", "scope-nrad", "scope-allrad"]
         assert {attrs["name"] for attrs in radios} == {"scope"}                     # one group: exactly one is chosen
         assert ["checked" in attrs for attrs in radios] == [True, False, False]
+        assert radios[0]["aria-describedby"] == "scope-note"                        # the line that says what Auto does
         script = main_script()
-        assert 'scope: "all", auto: true' in script                               # "Alles" and the automatic mode at the start
-        assert 'const SCOPES = { all: ["allrad", "nrad"], nrad: ["nrad"], allrad: ["allrad"] }' in script
-        for scope, label in (("all", "Alles"), ("nrad", "Nur NRAD-Codes"), ("allrad", "Nur Allrad-Codes")):
+        assert 'scope: "auto", auto: true' in script                              # "Auto" and the automatic mode at the start
+        assert 'const SCOPES = { auto: null, nrad: ["nrad"], allrad: ["allrad"] }' in script
+        for scope, label in (("auto", "Auto"), ("nrad", "Nur NRAD-Codes"), ("allrad", "Nur Allrad-Codes")):
             assert f'id="scope-{scope}" value="{scope}"' in PAGE and f">{label}</label>" in PAGE
+        assert "Alles" not in PAGE                                                  # "Auto" replaced it
 
     def test_the_only_checkbox_is_the_one_of_the_preview(self):
         boxes = {attrs["id"]: attrs for attrs in tags("input") if attrs.get("type") == "checkbox"}
         assert set(boxes) == {"hide-empty"}
         assert "checked" not in boxes["hide-empty"]                              # the preview shows every row of the Excel at first
 
-    def test_alles_with_one_map_names_the_other_or_the_choice_that_needs_only_this_one(self):
+    def test_auto_uses_the_maps_that_were_chosen_and_says_so(self):
         script = main_script()
-        assert 'state.scope === "all" && present.length === 1 ? " – oder " + ONLY[present[0]] + " wählen"' in script
-        assert 'const ONLY = { allrad: "„Nur Allrad-Codes“", nrad: "„Nur NRAD-Codes“" }' in script
+        assert "const needed = () => SCOPES[state.scope] || present();" in script      # Auto: the maps that are there
+        assert "if (!needed().length) list.push(catalog.slots.maps);" in script        # ... at least one
+        for text in ("Auto: alle Codes – Allrad mit der Allrad-Map, NRAD mit der NRAD-Map.",
+                     '"Auto: nur " + DEPT[maps[0]] + "-Codes. Für die " + DEPT[other] + "-Codes die " + catalog.slots[other] + " hinzufügen."',
+                     "Auto: ausgewertet werden die Bereiche, deren Map gewählt ist."):
+            assert text in script, text
+        assert 'if (slots.length < 2) return appError("E302", state.auto ? "maps" : "allrad");' in script
+
+    def test_quitting_always_takes_two_clicks(self):
+        first = re.search(r'\$\("quit"\)\.addEventListener\("click", \(\) => \{(.*?)\n  \}\);', main_script(), re.S).group(1)
+        assert "quit()" not in first and "fetch" not in first                        # the first click only asks ...
+        assert '$("confirm").hidden = false;' in first and '$("quit-no").focus();' in first   # ... with the safe button focused
+        assert "Programm wirklich beenden?" in first and "noch nicht heruntergeladen" in first
+        assert '$("quit-yes").addEventListener("click", quit);' in main_script()    # the second click stops it
+        assert not re.findall(r"\bquit\(\);", main_script()) and main_script().count('fetch("shutdown"') == 1   # never called directly
 
     def test_the_automatic_mode_sends_every_map_alone_and_takes_all_or_none(self):
         script = main_script()
@@ -294,7 +309,7 @@ class TestPageAndServerAgree:
         for prefix in ("field-", "file-", "drop-", "text-", "sub-"):
             for slot in SLOT_LABELS:
                 assert prefix + slot in ids, prefix + slot
-        for scope in ("all", "nrad", "allrad"):
+        for scope in ("auto", "nrad", "allrad"):
             assert "scope-" + scope in ids
 
     def test_every_element_with_a_data_hook_in_the_script_exists_in_the_page(self):

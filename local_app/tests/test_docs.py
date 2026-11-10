@@ -119,7 +119,7 @@ class TestReadmeIsShortAndComplete:
 
     def test_the_buttons_and_labels_it_names_are_on_the_page(self):
         page = (APP / "static" / "index.html").read_text(encoding="utf-8")
-        for label in ("Mitarbeiterstatistik", "Was auswerten?", "Alles", "Nur NRAD-Codes", "Nur Allrad-Codes", "Leistungsmaps",
+        for label in ("Mitarbeiterstatistik", "Was auswerten?", "Auto", "Nur NRAD-Codes", "Nur Allrad-Codes", "Leistungsmaps",
                       "Maps selbst zuordnen", "Auswerten", "Excel herunterladen", "Weitere Statistik hochladen", "Server beenden",
                       "Hinweise anzeigen"):
             assert f"**{label}**" in README or label in README, label
